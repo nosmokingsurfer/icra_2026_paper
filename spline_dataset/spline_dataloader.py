@@ -22,33 +22,22 @@ def add_noise_to_poses(poses, pos_std=0.9, angle_std=0.001):
     x_noisy = x + np.random.normal(0, pos_std, size=x.shape)
     y_noisy = y + np.random.normal(0, pos_std, size=y.shape)
 
-    noisy_poses = np.stack([x_noisy, y_noisy, poses[:, 2], poses[:, 3]], axis=1)
+    noisy_poses = np.stack([x_noisy, y_noisy, poses[:, 2]], axis=1)
     return noisy_poses
     
     
 def convert_to_se3(poses):
-    """
-    Convert gt_poses to SE(3) transformation matrices.
-    
-    Args:
-        poses: ndarray of shape (N, 4) or (4,), each row [x, y, cos(theta), sin(theta)].
-        
-    Returns:
-        se3_matrices: ndarray of shape (N, 4, 4) or (4, 4)
-    """
-    poses = np.array(poses)  # just in case it's a list
-
+    poses = np.array(poses) 
     single_input = False
-    if poses.ndim == 1 and poses.shape[0] == 4:
-        poses = poses[None, :]  # make it shape (1, 4)
+    if poses.ndim == 1 and poses.shape[0] == 3:
+        poses = poses[None, :]  # make it shape (1, 3)
         single_input = True
 
     num_poses = poses.shape[0]
     se3_matrices = np.zeros((num_poses, 4, 4))
 
     for i, pose in enumerate(poses):
-        x, y, cos_theta, sin_theta = pose
-        theta = np.arctan2(sin_theta, cos_theta)
+        x, y, theta= pose
 
         R = np.array([
             [np.cos(theta), -np.sin(theta), 0],
@@ -91,7 +80,8 @@ class Spline_2D_Dataset(Dataset):
                 gyro += np.random.multivariate_normal(self.bias_w, self.Q_w, gyro.shape[0]).reshape(-1, 1)
 
             imu = np.concatenate([acc, gyro], axis=1)
-            poses = np.concatenate([spline_points[:10], tau[:10]], axis=1) # spline_points[:tau.shape[0]], tau]
+            yaw = np.arctan2(tau[:, 1], tau[:, 0])
+            poses = np.concatenate([spline_points[:20], yaw[:20, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
             se3 = convert_to_se3(poses)
 
             self.imu_data.append(torch.tensor(imu, dtype=torch.float32).T)  # shape: [3, T]

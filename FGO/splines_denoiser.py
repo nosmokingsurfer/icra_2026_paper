@@ -3,59 +3,45 @@ import numpy as np
 np.set_printoptions(precision=4,linewidth=180)
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
+import matplotlib.pyplot as plt
 import os
 import sys
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from mrob_num_diff.graph_generator import ToRoContainer
-from mrob_num_diff.num_diff import compare_gradients, visualize_gradient
-from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff1_3d
+from mrob_num_diff.num_diff_3d import numerical_diff2_3d
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
-
-
-def convert_to_se3_torch(gt_poses):
-    num_poses = gt_poses.shape[0]
-    se3_matrices = []
-    for i in range(num_poses):
-        x, y, cos_theta, sin_theta = gt_poses[i]
-        theta = torch.atan2(sin_theta, cos_theta)
-        R = torch.tensor([
-            [torch.cos(theta), -torch.sin(theta), 0.0],
-            [torch.sin(theta),  torch.cos(theta), 0.0],
-            [0.0,              0.0,             1.0]
-        ], device=gt_poses.device, dtype=gt_poses.dtype)
-        T = torch.eye(4, device=gt_poses.device, dtype=gt_poses.dtype)
-        T[:3, :3] = R
-        T[:3, 3] = torch.tensor([x, y, 0.0], device=gt_poses.device, dtype=gt_poses.dtype)
-        se3_matrices.append(T)
-    return torch.stack(se3_matrices, dim=0)
    
-   
-def plot_losses(losses, title):
-    plt.figure(figsize=(12, 6))
-    plt.plot(losses, marker='o', linestyle='-', color='b')
-    plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel(title, fontsize=12)
-    plt.title(f'{title} per Epoch', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.show()   
-    
-    
-class TrivialPoseDenoiser(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = nn.Linear(4, 4)  # input: noisy [x, y, cos, sin] → output: cleaned
 
-    def forward(self, x):
-        return self.linear(x)
+def plot_losses(chi2_losses, rmse_losses, labels=("Chi²", "RMSE"), title="Losses", output_path=None):
+    epochs = list(range(len(chi2_losses)))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+
+    ax1.plot(epochs, chi2_losses, color='blue', marker='o', label=labels[0])
+    ax1.set_ylabel(labels[0], fontsize=14)
+    ax1.set_title(title, fontsize=16)
+    ax1.grid(True)
+    ax1.legend(fontsize=12)
+
+    ax2.plot(epochs, rmse_losses, color='red', marker='x', label=labels[1])
+    ax2.set_xlabel("Epoch", fontsize=14)
+    ax2.set_ylabel(labels[1], fontsize=14)
+    ax2.grid(True)
+    ax2.legend(fontsize=12)
+
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path)
+    else:
+        plt.show()
+    plt.close('all')
+    
 
 class TrivialPoseDenoiser(nn.Module):
     def __init__(self):
@@ -65,27 +51,6 @@ class TrivialPoseDenoiser(nn.Module):
     def forward(self, x):
         denoised_translation = self.translation(x[:, :2])
         return torch.cat([denoised_translation, x[:, 2:]], dim=1)
-
-def print_2d_graph(graph, gt_poses):
-    x = graph.get_estimated_state()
-    
-    prev_p = np.array(graph.get_estimated_state()[0][:2, 3])
-    plt.figure()
-
-    for p in x:
-        p = p[:2, 3]
-        plt.plot(p[0], p[1], 'ob')
-        plt.plot((prev_p[0], p[0]), (prev_p[1], p[1]), '-b', label='estimated')
-        
-        prev_p = p
-    
-    plt.plot(gt_poses[:, :2][:, 0], gt_poses[:, :2][:, 1], label='GT', color='red')
-    plt.title("2D Pose Graph")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.legend()
-    plt.grid()
-    plt.show()
     
 
 def compute_delta_x(gt_poses, estimated_poses):
@@ -101,19 +66,19 @@ def populate_graph(pred_poses, gt_poses):
     toro_container = ToRoContainer()
 
     W_odo = torch.eye(6) * 10.0
-    W_gps = torch.eye(6) * 100.0
+    W_gps = torch.eye(6) * 50.0
 
     node_ids = []
     T_nodes = []
     # Initialize nodes using predicted poses (world frame)
     for i in range(len(pred_poses)):
-        T_i = mrob.SE3(convert_to_se3_torch(pred_poses[i].unsqueeze(0))[0])
+        T_i = mrob.SE3(convert_to_se3(pred_poses[i].detach().cpu().numpy()))
         T_nodes.append(T_i)
         node_id = graph.add_node_pose_3d(T_i)
         node_ids.append(node_id)
         toro_container.add_node_pose_3d(node_id, T_i.Ln())
 
-    # Odometry factors 
+    # Odometry factors from predicted poses
     for i in range(len(node_ids) - 1):
         T_pred_i   = T_nodes[i]
         T_pred_ip1 = T_nodes[i + 1]
@@ -121,80 +86,84 @@ def populate_graph(pred_poses, gt_poses):
         graph.add_factor_2poses_3d(T_odo, node_ids[i], node_ids[i + 1], W_odo.numpy())
         toro_container.add_factor_2poses_3d(node_ids[i], node_ids[i + 1], T_odo.Ln(), W_odo.numpy())
     
-    # GPS factors
+    # GPS factors from GT poses
     for i in range(len(node_ids)):
-        T_gps = mrob.SE3(convert_to_se3_torch(gt_poses[i].unsqueeze(0))[0])
+        T_gps = mrob.SE3(convert_to_se3(gt_poses[i].detach().cpu().numpy()))
         graph.add_factor_1pose_3d(T_gps, node_ids[i], W_gps.numpy())
         toro_container.add_factor_1pose_3d(node_ids[i], T_gps.Ln(), W_gps.numpy())
     
     return graph, toro_container.get_lines()
 
 
-def compare_estimated_poses(graph, gt_poses, noisy_poses, delta_x, epoch):
-    est_poses = graph.get_estimated_state()
-    N = len(est_poses)
+def plot_pose_comparison(est_xy, gt_xy, est_yaw, gt_yaw, epoch, rmse_trans, output_dir=None):
+    N = len(est_xy)
+    plt.figure(figsize=(10, 8))
+    plt.plot(est_xy[:, 0], est_xy[:, 1], '-o', color= 'blue', label='Estimated')
+    plt.plot(gt_xy[:, 0],  gt_xy[:, 1],  '-x', color='red', label='Ground Truth')
 
-    sum_trans_sq = 0.0
-    sum_rot_sq   = 0.0
+    arrow_scale = 0.1
+    head_width = 0.02
+    head_length = 0.04
+    for i in range(0, N, max(1, N // 10)):
+        ex, ey, eyaw = est_xy[i][0], est_xy[i][1], est_yaw[i]
+        gx, gy, gyaw = gt_xy[i][0], gt_xy[i][1], gt_yaw[i]
+        plt.arrow(ex, ey, arrow_scale * np.cos(eyaw), arrow_scale * np.sin(eyaw),
+                  head_width=head_width, head_length=head_length, color='blue', alpha=0.6)
+        plt.arrow(gx, gy, arrow_scale * np.cos(gyaw), arrow_scale * np.sin(gyaw),
+                  head_width=head_width, head_length=head_length, color='red', alpha=0.6)
 
-    est_xy = []
-    gt_xy  = []
-    noisy_xy = []
-
-    for i in range(N):
-        # delta = mrob.SE3(est_poses[i]) * mrob.SE3(gt_poses[i]).inv()
-        # xi = delta.Ln()
-        xi = delta_x[i]
-        
-        rot_vec = xi[:3]
-        trans_vec = xi[3:]
-        
-        sum_rot_sq   += np.sum(rot_vec**2)
-        sum_trans_sq += np.sum(trans_vec**2)
-
-        e_x = est_poses[i][0, 3]
-        e_y = est_poses[i][1, 3]
-        est_xy.append([e_x, e_y])
-
-        g_x = gt_poses[i][0, 3]
-        g_y = gt_poses[i][1, 3]
-        gt_xy.append([g_x, g_y])
-        
-        n_x = noisy_poses[i][0, 3]
-        n_y = noisy_poses[i][1, 3]
-        noisy_xy.append([n_x, n_y])
-
-    rmse_rot   = np.sqrt(sum_rot_sq   / N)  # rotation norm
-    rmse_trans = np.sqrt(sum_trans_sq / N)  # translation norm
-
-    # print(f"RMSE (rotation)    : {rmse_rot}")
-    print(f"RMSE (translation) : {rmse_trans}")
-
-    est_xy = np.array(est_xy)
-    gt_xy  = np.array(gt_xy)
-    noisy_xy = np.array(noisy_xy)
-
-    plt.figure()
-    plt.plot(est_xy[:, 0], est_xy[:, 1], '-o', label='Estimated')
-    plt.plot(gt_xy[:, 0],  gt_xy[:, 1],  '-x', label='Ground Truth')
-    # plt.plot(noisy_xy[:, 0], noisy_xy[:, 1], '--', label='Noisy')
-    plt.title("Pose Comparison (2D Projection of SE(3))")
+    plt.title(f"Epoch {epoch}: Estimated vs Ground Truth Poses. RMSE = {rmse_trans:.3f}")
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid(True)
     plt.axis("equal")
     plt.legend()
-    os.makedirs('out/poses', exist_ok=True)
-    plt.savefig(f'out/poses/poses_{epoch}')
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(f'{output_dir}/poses_{epoch}')
+    else:
+        plt.show()    
     plt.close('all')
+    
 
+def compute_rmse_and_yaw(graph, gt_poses, delta_x, epoch, plot=False, output_dir=None):
+    est_poses = graph.get_estimated_state()
+    N = len(est_poses)
+
+    sum_trans_sq = 0.0
+    sum_rot_sq = 0.0
+    est_xy, gt_xy = [], []
+    est_yaw, gt_yaw = [], []
+
+    for i in range(N):
+        xi = delta_x[i]
+        rot_vec, trans_vec = xi[:3], xi[3:]
+
+        sum_rot_sq += np.sum(rot_vec**2)
+        sum_trans_sq += np.sum(trans_vec**2)
+
+        est_pose = est_poses[i]
+        gt_pose = gt_poses[i]
+
+        est_xy.append(est_pose[:2, 3])
+        gt_xy.append(gt_pose[:2, 3])
+
+        est_yaw.append(np.arctan2(est_pose[1, 0], est_pose[0, 0]))
+        gt_yaw.append(np.arctan2(gt_pose[1, 0], gt_pose[0, 0]))
+
+    rmse_rot = np.sqrt(sum_rot_sq / N)
+    rmse_trans = np.sqrt(sum_trans_sq / N)
+    
+    if plot:
+        plot_pose_comparison(np.array(est_xy), np.array(gt_xy), np.unwrap(np.array(est_yaw)), np.unwrap(np.array(gt_yaw)), epoch, rmse_trans, output_dir)
+
+    return rmse_trans
 
 
 if __name__ == "__main__":
     model = TrivialPoseDenoiser()
     # model.load_state_dict(torch.load("out/model.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
-    scheduler = StepLR(optimizer, step_size=1000, gamma=0.001)
     criterion = nn.MSELoss()
     path_to_splines = "./out/spline_dataset"
     number_of_splines = 10
@@ -206,14 +175,14 @@ if __name__ == "__main__":
     dataset = Spline_2D_Dataset(path_to_splines, enable_noise=False)[0]
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
     output_path = 'out'
-    num_epochs = 100
+    num_epochs = 50
     
-    losses = []
+    rmse_errors = []
     chi2_errors = []
+    
     for epoch in tqdm((range(num_epochs))):
-        epoch_loss = 0
         model.train()
-        for noisy_poses, gt_poses in dataloader: 
+        for noisy_poses, gt_poses in dataloader:
             model.train()
             pred_poses = model(noisy_poses)
 
@@ -226,32 +195,26 @@ if __name__ == "__main__":
                 f.writelines(toro_lines)
                 f.close()
 
-            chi2_dx_dz = numerical_diff2_3d(toro_file, dx=1e-5, dz=1e-4)
+            chi2_dx_dz = numerical_diff2_3d(toro_file, dx=1e-5, dz=1e-4, parallel=False)
             chi2_errors.append(graph.chi2())
            
-            gt_poses_se3 = convert_to_se3_torch(gt_poses) 
+            gt_poses_se3 = convert_to_se3(gt_poses.detach().cpu().numpy()) 
             delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
             
-            noisy_poses_se3 = convert_to_se3_torch(noisy_poses) 
-            compare_estimated_poses(graph, gt_poses_se3, noisy_poses_se3, delta_x, epoch)
+            noisy_poses_se3 = convert_to_se3(noisy_poses.detach().cpu().numpy()) 
+            rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir=f'{output_path}/poses')
+            rmse_errors.append(rmse_trans)
             
             N = chi2_dx_dz.shape[0]
             mult = (delta_x.reshape(-1) @ chi2_dx_dz)[:, 0:N].reshape(-1, 6)
             mult_tensor = torch.from_numpy(np.array(mult)).float()
-            
-            grad_trans = mult_tensor[:, 3:5]    # for x y
-            grad_yaw = mult_tensor[:, 2]        # for yaw
-            
-            pred_angle_tensor = torch.atan2(pred_poses[:, 3], pred_poses[:, 2])
-            grad_angle = grad_yaw.unsqueeze(1) * torch.stack([-torch.sin(pred_angle_tensor), torch.cos(pred_angle_tensor)], dim=1)
 
-            grad_final = torch.cat([grad_trans, grad_angle], dim=1)
-            # print(grad_final)
+            grad_final = mult_tensor[:, [3, 4, 2]] 
 
+            assert pred_poses.requires_grad
+            
             optimizer.zero_grad()
             pred_poses.backward(gradient=grad_final.type(torch.float32))
             optimizer.step()
-            
-        scheduler.step()
-    
-    plot_losses(chi2_errors, 'Chi2')
+
+    plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Losses', f'{output_path}/losses.png')

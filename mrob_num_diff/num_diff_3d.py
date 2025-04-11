@@ -2,11 +2,11 @@ import numpy as np
 import mrob
 from tqdm import tqdm 
 import matplotlib.pyplot as plt
-import os
 from multiprocessing import Pool, cpu_count
-from sklearn.metrics.pairwise import cosine_similarity
-from mrob_num_diff.num_diff import find_factor_coord_idx, visualize_gradient, compare_gradients
+import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from mrob_num_diff.num_diff import find_factor_coord_idx, visualize_gradient, compare_gradients
 from pathlib import Path
 
 
@@ -58,23 +58,16 @@ def read_graph_toro_description_3d(toro_file):
 
 def compose_graph_3d(vertex_ini, factors, factors_dictionary, perturb_index_x=None, perturb_index_z=None, dx=0, dz=0):
     graph = mrob.FGraph()
-    
-    # Добавляем узлы в отсортированном по возрастанию порядке.
+
     for node_index in sorted(vertex_ini.keys()):
-        x = vertex_ini[node_index].copy()  # x – координаты в Ln (6 элементов)
+        x = vertex_ini[node_index].copy() 
         if perturb_index_x is not None and node_index == perturb_index_x[0]:
             x[perturb_index_x[1]] += dx
         pose = mrob.SE3(x)
-        # Здесь узлы добавляются в том же порядке, что и ключи vertex_ini.
         graph.add_node_pose_3d(pose)
 
-    # Определяем новый порядок для факторов:
-    # - Если node_origin != node_target, это одометрия – им присваиваем приоритет 0.
-    # - Если node_origin == node_target, это GPS – приоритет 1.
-    # Вторым и третьим уровнем сортировки служат target и origin.
     sorted_factor_keys = sorted(factors.keys(), key=lambda k: (0 if k[0] != k[1] else 1, k[1], k[0]))
 
-    # Добавляем факторы согласно отсортированному порядку.
     for (node_origin, node_target) in sorted_factor_keys:
         measurement, information_matrix = factors[(node_origin, node_target)]
         obs = measurement.copy()
@@ -89,7 +82,6 @@ def compose_graph_3d(vertex_ini, factors, factors_dictionary, perturb_index_x=No
             graph.add_factor_1pose_3d(obs_se3, node_origin, information_matrix)
             
     return graph
-
 
 
 def numerical_diff1_3d(toro_file, dz=1e-4):
@@ -120,7 +112,7 @@ def numerical_diff1_3d(toro_file, dz=1e-4):
         gradient[:, i] = np.array(dx_new).flatten()
     return gradient
 
-
+############################ Numerical diff 2######################################################
 def compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz):
     factor_idx_x, coord_idx_x = find_factor_coord_idx(i_x, coord_num=6)
     factor_idx_z, coord_idx_z = find_factor_coord_idx(i_z, coord_num=6)
@@ -145,7 +137,12 @@ def compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys,
     return (chi2_pp - chi2_pm - chi2_mp + chi2_mm) / 4 / dx / dz
 
 
-def numerical_diff2_3d(toro_file, dx=1e-2, dz=1e-2):
+def parallel_compute_chi2_matrix_3d(args):
+    vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz = args
+    return (i_x, i_z, compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz))
+
+
+def numerical_diff2_3d(toro_file, dx=1e-2, dz=1e-2, parallel=False):
     vertex_ini, factors, factors_dictionary = read_graph_toro_description_3d(toro_file)
     graph_0 = compose_graph_3d(vertex_ini, factors, factors_dictionary)
     x_0 = graph_0.get_estimated_state()
@@ -156,20 +153,29 @@ def numerical_diff2_3d(toro_file, dx=1e-2, dz=1e-2):
     graph_0.solve(mrob.LM, verbose=False)
     hessian = graph_0.get_information_matrix().todense()
     
-    for i_x in tqdm(range(dim_x)):
-        for i_z in range(dim_z):
-            chi2_matrix[i_x, i_z] = compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
-            
+    if parallel:
+        tasks = [(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
+                for i_x in range(dim_x) for i_z in range(dim_z)]
+
+        print("Computing chi2 matrix in parallel...")
+        with Pool(cpu_count()) as pool:
+            for i_x, i_z, value in tqdm(pool.imap_unordered(parallel_compute_chi2_matrix_3d, tasks), total=len(tasks)):
+                chi2_matrix[i_x, i_z] = value
+    else:        
+        for i_x in tqdm(range(dim_x)):
+            for i_z in range(dim_z):
+                chi2_matrix[i_x, i_z] = compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
+        
     return -np.linalg.inv(hessian) @ chi2_matrix
 
 
 if __name__ == "__main__":  
-    toro_file = './out/spline_toro_graph_9.txt'
+    toro_file = './out/toro_file.txt'
     dx = 1e-1
     dz = 1e-1
     
     w_odo = 0.1
-    dir_to_save = f'./out/gradients_w_odo={w_odo}'
+    dir_to_save = f'./out/gradients'
     if not os.path.exists(dir_to_save):
         os.makedirs(dir_to_save)
     

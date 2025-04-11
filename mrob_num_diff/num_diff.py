@@ -229,7 +229,8 @@ def compare_gradients(gradient1, gradient2, dir_to_save, dx=None, dz=None):
     fig.colorbar(im1, ax=ax, orientation='vertical', fraction=0.02, pad=0.04)
     if dir_to_save is not None:
         plt.savefig(os.path.join(dir_to_save, f'both_dx={dx}_dz={dz}.png'))
-    plt.show()
+    else:    
+        plt.show()
 
     # plt.imshow(gradient1 - gradient2)
     # plt.title('grad_1 - grad_2')
