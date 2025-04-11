@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from spline_dataset.spline_diff import generate_imu_data
 from spline_dataset.spline_generation import generate_batch_of_splines
 
-def add_noise_to_poses(poses, pos_std=0.9, angle_std=0.001):
+def add_noise_to_poses(poses, pos_std=0.7):
     poses = poses.clone() if isinstance(poses, torch.Tensor) else poses.copy()
 
     x = poses[:, 0]
@@ -81,7 +81,7 @@ class Spline_2D_Dataset(Dataset):
 
             imu = np.concatenate([acc, gyro], axis=1)
             yaw = np.arctan2(tau[:, 1], tau[:, 0])
-            poses = np.concatenate([spline_points[:20], yaw[:20, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
+            poses = np.concatenate([spline_points[:15], yaw[:15, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
             se3 = convert_to_se3(poses)
 
             self.imu_data.append(torch.tensor(imu, dtype=torch.float32).T)  # shape: [3, T]

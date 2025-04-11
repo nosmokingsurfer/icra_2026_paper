@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import imageio.v2 as imageio
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -160,6 +161,17 @@ def compute_rmse_and_yaw(graph, gt_poses, delta_x, epoch, plot=False, output_dir
     return rmse_trans
 
 
+def make_gif_from_figures(folder_path, output_path="graph_evolution.gif", duration=0.3):
+    file_list = sorted(
+        [f for f in os.listdir(folder_path) if f.startswith("poses_") and f.endswith(".png")],
+        key=lambda x: int(''.join(filter(str.isdigit, x)))
+    )
+
+    images = [imageio.imread(os.path.join(folder_path, fname)) for fname in file_list]
+    imageio.mimsave(output_path, images, duration=duration)
+    print(f"GIF saved to {output_path}")
+
+
 if __name__ == "__main__":
     model = TrivialPoseDenoiser()
     # model.load_state_dict(torch.load("out/model.pth"))
@@ -175,7 +187,7 @@ if __name__ == "__main__":
     dataset = Spline_2D_Dataset(path_to_splines, enable_noise=False)[0]
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
     output_path = 'out'
-    num_epochs = 50
+    num_epochs = 100
     
     rmse_errors = []
     chi2_errors = []
@@ -218,3 +230,4 @@ if __name__ == "__main__":
             optimizer.step()
 
     plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Losses', f'{output_path}/losses.png')
+    make_gif_from_figures(f'{output_path}/poses', output_path=f'{output_path}/graph_evolution.gif')
