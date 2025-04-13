@@ -81,7 +81,7 @@ class Spline_2D_Dataset(Dataset):
 
             imu = np.concatenate([acc, gyro], axis=1)
             yaw = np.arctan2(tau[:, 1], tau[:, 0])
-            poses = np.concatenate([spline_points[:15], yaw[:15, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
+            poses = np.concatenate([spline_points[:55], yaw[:55, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
             se3 = convert_to_se3(poses)
 
             self.imu_data.append(torch.tensor(imu, dtype=torch.float32).T)  # shape: [3, T]
@@ -108,9 +108,9 @@ if __name__ == "__main__":
     path_to_splines = "./out/spline_dataset"
     number_of_splines = 10
     
-    if not os.path.exists(path_to_splines):
-        number_of_control_nodes = 10
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
+    # if not os.path.exists(path_to_splines):
+    number_of_control_nodes = 10
+    generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
     
     dataset = Spline_2D_Dataset(path_to_splines, enable_noise=False)
     print(len(dataset))

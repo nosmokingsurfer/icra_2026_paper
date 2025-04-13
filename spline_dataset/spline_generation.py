@@ -62,18 +62,18 @@ def on_click(event):
     fig.canvas.draw()
 
 
-def generate_batch_of_splines(out_path, B=10, n_control_points=100, n_pts_spline_segment=100):
-    """Generate B random splines and save them to files."""
+def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=100, n_pts_spline_segment=100):
+    """Generate number_of_splines random splines and save them to files."""
     if os.path.exists(out_path):
         shutil.rmtree(out_path)
     os.makedirs(out_path)
 
-    for b in range(B):
+    for b in range(number_of_splines):
         rnd_pts = np.random.uniform(-5, 5, size=(n_control_points, 2))
         rnd_pts[:, 0] = np.linspace(0, 20, n_control_points)
 
         spline_points = bspline(rnd_pts, n_control_points * n_pts_spline_segment, 3)
-        plt.plot(spline_points[:, 0], spline_points[:, 1])
+        plt.plot(spline_points[:, 0], spline_points[:, 1], marker='o', markersize=0.5)
         np.savetxt(f'{out_path}/spline_{b}.txt', spline_points)
 
     plt.grid()

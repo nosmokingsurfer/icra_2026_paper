@@ -13,8 +13,8 @@ import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from mrob_num_diff.graph_generator import ToRoContainer
-from mrob_num_diff.num_diff_3d import numerical_diff2_3d
+from mrob_num_diff.graph_generator import ToRoContainer, compare_gradients
+from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_sparse
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
    
@@ -177,48 +177,56 @@ if __name__ == "__main__":
     # model.load_state_dict(torch.load("out/model.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
     criterion = nn.MSELoss()
-    path_to_splines = "./out/spline_dataset"
-    number_of_splines = 10
+    path_to_splines = "./out/splines_train"
     
     if not os.path.exists(path_to_splines):
+        number_of_splines = 1
         number_of_control_nodes = 10
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
+        n_pts_spline_segment = 100
+        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, n_pts_spline_segment)
     
-    dataset = Spline_2D_Dataset(path_to_splines, enable_noise=False)[0]
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=False)
+    train_dataset = Spline_2D_Dataset(path_to_splines)[0]
+    train_dataloader = DataLoader(train_dataset, batch_size=100, shuffle=False)
+    
+    valid_dataset = Spline_2D_Dataset(path_to_splines)[1]
+    valid_dataloader = DataLoader(valid_dataset, batch_size=100, shuffle=False)
+    
     output_path = 'out'
-    num_epochs = 100
+    num_epochs = 90
     
     rmse_errors = []
     chi2_errors = []
     
+    rmse_errors_valid = []
+    chi2_errors_valid = []
+    
     for epoch in tqdm((range(num_epochs))):
         model.train()
-        for noisy_poses, gt_poses in dataloader:
+        for noisy_poses, gt_poses in train_dataloader:
             model.train()
             pred_poses = model(noisy_poses)
+            
+            N = gt_poses.shape[0]
 
             graph, toro_lines = populate_graph(pred_poses, gt_poses)
             graph.solve(mrob.LM)
-            print()
-            print(f"Epoch {epoch}: Chi-squared error: {graph.chi2()}")
+            chi2 = graph.chi2()
             toro_file = os.path.join(output_path, 'toro_file.txt')
             with open(toro_file,'w') as f:
                 f.writelines(toro_lines)
                 f.close()
 
-            chi2_dx_dz = numerical_diff2_3d(toro_file, dx=1e-5, dz=1e-4, parallel=False)
-            chi2_errors.append(graph.chi2())
+            dL_dz = numerical_diff2_3d_sparse(toro_file, dx=1e-5, dz=1e-4, parallel=False)
+            chi2_errors.append(chi2)
            
             gt_poses_se3 = convert_to_se3(gt_poses.detach().cpu().numpy()) 
             delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
+            delta_x_flat = delta_x.reshape(-1)
             
-            noisy_poses_se3 = convert_to_se3(noisy_poses.detach().cpu().numpy()) 
-            rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir=f'{output_path}/poses')
+            rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir=f'{output_path}/poses_train')
             rmse_errors.append(rmse_trans)
             
-            N = chi2_dx_dz.shape[0]
-            mult = (delta_x.reshape(-1) @ chi2_dx_dz)[:, 0:N].reshape(-1, 6)
+            mult = (delta_x_flat @ dL_dz)[0:(N * 6)].reshape(-1, 6)
             mult_tensor = torch.from_numpy(np.array(mult)).float()
 
             grad_final = mult_tensor[:, [3, 4, 2]] 
@@ -228,6 +236,25 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             pred_poses.backward(gradient=grad_final.type(torch.float32))
             optimizer.step()
+            
+        model.eval()
+        with torch.no_grad():
+            for noisy_poses_valid, gt_poses_valid in valid_dataloader:
+                pred_poses_valid = model(noisy_poses)
+                graph_valid, _ = populate_graph(pred_poses_valid, gt_poses_valid)
+                graph_valid.solve(mrob.LM)
+                chi2_valid = graph_valid.chi2()
+                delta_x_valid = compute_delta_x(convert_to_se3(gt_poses_valid.numpy()), graph_valid.get_estimated_state())
+                rmse_trans_valid = compute_rmse_and_yaw(graph_valid, convert_to_se3(gt_poses_valid.numpy()), delta_x_valid, epoch, plot=True, output_dir='out/poses_valid')
+                rmse_errors_valid.append(rmse_trans_valid)
+                chi2_errors_valid.append(chi2_valid)
+            
+        print(f"Epoch {epoch}")
+        print(f"Chi2 on training: {chi2}, RMSE on training: {rmse_trans}")
+        print(f"Chi2 on validation: {chi2_valid}, RMSE on validation: {rmse_trans_valid}") 
 
-    plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Losses', f'{output_path}/losses.png')
-    make_gif_from_figures(f'{output_path}/poses', output_path=f'{output_path}/graph_evolution.gif')
+    plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Train Losses', f'{output_path}/train_losses.png')
+    make_gif_from_figures(f'{output_path}/poses_train', output_path=f'{output_path}/train_graph_evolution.gif')
+    
+    plot_losses(chi2_errors_valid, rmse_errors_valid, ('Chi2', 'RMSE'), 'Valid Losses', f'{output_path}/valid_losses.png')
+    make_gif_from_figures(f'{output_path}/poses_valid', output_path=f'{output_path}/valid_graph_evolution.gif')

@@ -214,7 +214,7 @@ def mean_squared_error(matrix1, matrix2):
     return np.linalg.norm(matrix1 - matrix2)
 
 
-def compare_gradients(gradient1, gradient2, dir_to_save, dx=None, dz=None):
+def compare_gradients(gradient1, gradient2, dir_to_save=None, dx=None, dz=None):
     print('Norm of gradient1:', np.linalg.norm(gradient1))
     print('Norm of gradient2:', np.linalg.norm(gradient2))
     

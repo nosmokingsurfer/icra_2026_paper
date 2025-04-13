@@ -169,6 +169,68 @@ def numerical_diff2_3d(toro_file, dx=1e-2, dz=1e-2, parallel=False):
     return -np.linalg.inv(hessian) @ chi2_matrix
 
 
+def sparse_chi2_task(args):
+    vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz = args
+    val = compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
+    return (i_x, i_z, val)
+
+
+def numerical_diff2_3d_sparse(toro_file, dx=1e-2, dz=1e-2, parallel=False):
+    vertex_ini, factors, factors_dictionary = read_graph_toro_description_3d(toro_file)
+    graph_0 = compose_graph_3d(vertex_ini, factors, factors_dictionary)
+    graph_0.solve(mrob.LM, verbose=False)
+    
+    x_0 = graph_0.get_estimated_state()
+    N = len(x_0)          # number of poses
+    dim_x = 6 * N
+    dim_z = len(factors) * 6
+
+    hessian = graph_0.get_information_matrix().todense()
+    
+    # Only columns 2,3,4 of each 6D block matter
+    used_i_x = []
+    for i in range(N):
+        used_i_x.extend([6 * i + 2, 6 * i + 3, 6 * i + 4])
+
+    # Output only uses first N * 6 elements (related to poses)
+    used_i_z = list(range(N * 6))
+
+    chi2_matrix_sparse = np.zeros((len(used_i_x), len(used_i_z)))
+    i_x_map = {ix: k for k, ix in enumerate(used_i_x)}
+    i_z_map = {iz: k for k, iz in enumerate(used_i_z)}
+    factor_keys = list(factors.keys())
+
+    if parallel:
+        from multiprocessing import Pool, cpu_count
+
+        task_args = [
+            (vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
+            for i_x in used_i_x
+            for i_z in used_i_z
+        ]
+        with Pool(cpu_count()) as pool:
+            for i_x, i_z, val in tqdm(pool.imap_unordered(sparse_chi2_task, task_args), total=len(task_args)):
+                chi2_matrix_sparse[i_x_map[i_x], i_z_map[i_z]] = val
+    else:
+        for i_x in tqdm(used_i_x):
+            for i_z in used_i_z:
+                val = compute_chi2_matrix_3d(vertex_ini, factors, factors_dictionary, factor_keys, i_x, i_z, dx, dz)
+                chi2_matrix_sparse[i_x_map[i_x], i_z_map[i_z]] = val
+
+    # Restrict hessian to relevant rows
+    hessian_reduced = hessian[np.ix_(used_i_x, used_i_x)]
+
+    # Final matrix: -H^{-1} @ ∂²chi2/∂x∂z (sparse)
+    result_sparse = -np.linalg.solve(hessian_reduced, chi2_matrix_sparse)
+
+    # Insert back into full-sized matrix
+    chi2_dx_dz_full = np.zeros((dim_x, dim_z))
+    for k, i_x in enumerate(used_i_x):
+        chi2_dx_dz_full[i_x, :N * 6] = result_sparse[k, :]
+
+    return chi2_dx_dz_full
+
+
 if __name__ == "__main__":  
     toro_file = './out/toro_file.txt'
     dx = 1e-1
