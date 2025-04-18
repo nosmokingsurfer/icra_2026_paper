@@ -17,7 +17,7 @@ from mrob_num_diff.graph_generator import ToRoContainer, compare_gradients
 from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_sparse
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
-   
+
 
 def plot_losses(chi2_losses, rmse_losses, labels=("Chi²", "RMSE"), title="Losses", output_path=None):
     epochs = list(range(len(chi2_losses)))
@@ -94,6 +94,7 @@ def populate_graph(pred_poses, gt_poses):
         toro_container.add_factor_1pose_3d(node_ids[i], T_gps.Ln(), W_gps.numpy())
     
     return graph, toro_container.get_lines()
+
 
 
 def plot_pose_comparison(est_xy, gt_xy, est_yaw, gt_yaw, epoch, rmse_trans, output_dir=None):
@@ -192,7 +193,7 @@ if __name__ == "__main__":
     valid_dataloader = DataLoader(valid_dataset, batch_size=100, shuffle=False)
     
     output_path = 'out'
-    num_epochs = 200
+    num_epochs = 90
     
     rmse_errors = []
     chi2_errors = []
