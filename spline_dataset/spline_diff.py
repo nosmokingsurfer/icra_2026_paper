@@ -22,21 +22,24 @@ def generate_imu_data(data, sampling_rate=100):
     n[:, 0] = -n[:, 0]
 
     # Acceleration vector
-    acc = np.diff(velocity, axis=0) / dt
+    acc = np.diff(velocity, axis=0) / dt #TODO remove projection, return acc 
 
     # Accelerometer measurements (projected on tau and n)
-    acc_measurements = np.zeros_like(acc)
-    for i in range(len(acc)):
-        acc_measurements[i, 0] = np.dot(acc[i], tau[i])
-        acc_measurements[i, 1] = np.dot(acc[i], n[i])
+    # acc_measurements = np.zeros_like(acc)
+    # for i in range(len(acc)):
+    #     acc_measurements[i, 0] = np.dot(acc[i], tau[i])
+    #     acc_measurements[i, 1] = np.dot(acc[i], n[i])
+
+    acc_measurements = acc
 
     # Gyroscope measurements (angular velocity around Z-axis)
     gyro_measurements = np.zeros(len(tau) - 1)
+    yaw = np.zeros(len(tau)-1)
     for i in range(len(gyro_measurements)):
         cross = np.cross(tau[i], tau[i + 1])
         dot = np.dot(tau[i], tau[i + 1])
         angle = np.arctan2(cross, dot)
-        gyro_measurements[i] = angle / dt
+        gyro_measurements[i] = angle / dt #совпадает ось Z 
 
     # Align lengths
     N = min(len(acc_measurements), len(gyro_measurements))
@@ -47,9 +50,21 @@ def generate_imu_data(data, sampling_rate=100):
     velocity = velocity[:N]
     time = dt * np.arange(N)
     
+    # yaw[0] = 0.0
+    # for i in range(1, len(yaw)):
+    #     delta_angle = np.arctan2(
+    #         np.cross(tau[i - 1], tau[i]),
+    #         np.dot(tau[i - 1], tau[i])
+    #     )
+    #     yaw[i] = yaw[i - 1] + delta_angle
+    
+    yaw = np.arctan2(tau[:, 1], tau[:, 0])
+    
+    poses = np.concatenate([data[1:N+1], yaw[:N, None]], axis=1)
+    
     assert acc_measurements.shape[0] == gyro_measurements.shape[0], "Mismatch between acc and gyro lengths"
 
-    return acc_measurements, gyro_measurements.reshape(-1, 1), tau, n, velocity, time
+    return acc_measurements, gyro_measurements.reshape(-1, 1), velocity, poses
 
 
 def visualize_imu_data(data, acc_measurements, gyro_measurements):
@@ -80,7 +95,7 @@ def visualize_imu_data(data, acc_measurements, gyro_measurements):
 
 
 if __name__ == "__main__":
-    log_path = './out/spline_dataset/spline_points.txt'
+    log_path = './out/splines_/spline_0.txt'
     data = np.genfromtxt(log_path)
 
     acc_measurements, gyro_measurements, tau, n, velocity, time = generate_imu_data(data)

@@ -14,7 +14,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from mrob_num_diff.graph_generator import ToRoContainer, compare_gradients
-from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_sparse
+from mrob_num_diff.num_diff import find_factor_coord_idx, visualize_gradient
+from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_sparse, numerical_diff1_3d
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
@@ -65,14 +66,20 @@ def compute_delta_x(gt_poses, estimated_poses):
 def populate_graph(pred_poses, gt_poses):
     graph = mrob.FGraphDiff()
     toro_container = ToRoContainer()
-
+    
+    pred_V 
+    gt_V #local coord system
+    
+    pred_poses = np.cumsum(pred_v, w_z) + initial_from_gt
+    gt_poses = np.cumsum(gt_V)
+    
     W_odo = torch.eye(6) * 10.0
     W_gps = torch.eye(6) * 50.0
 
     node_ids = []
     T_nodes = []
     # Initialize nodes using predicted poses (world frame)
-    for i in range(len(pred_poses)):
+    for i in range(len(pred_poses)): # неподвижная система координат 
         T_i = mrob.SE3(convert_to_se3(pred_poses[i].detach().cpu().numpy()))
         T_nodes.append(T_i)
         node_id = graph.add_node_pose_3d(T_i)
@@ -80,10 +87,10 @@ def populate_graph(pred_poses, gt_poses):
         toro_container.add_node_pose_3d(node_id, T_i.Ln())
 
     # Odometry factors from predicted poses
-    for i in range(len(node_ids) - 1):
+    for i in range(len(node_ids) - 1): # source system coordinate 
         T_pred_i   = T_nodes[i]
         T_pred_ip1 = T_nodes[i + 1]
-        T_odo = T_pred_i.inv() * T_pred_ip1
+        T_odo = T_pred_i.inv() * T_pred_ip1 #mrob.SE3(pred_v, w (from IMU))
         graph.add_factor_2poses_3d_diff(T_odo, node_ids[i], node_ids[i + 1], W_odo.numpy())
         toro_container.add_factor_2poses_3d(node_ids[i], node_ids[i + 1], T_odo.Ln(), W_odo.numpy())
     
@@ -178,7 +185,7 @@ if __name__ == "__main__":
     # model.load_state_dict(torch.load("out/model.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
     criterion = nn.MSELoss()
-    path_to_splines = "./out/splines_train"
+    path_to_splines = "./out/splines_"
     
     if not os.path.exists(path_to_splines):
         number_of_splines = 10
@@ -186,14 +193,14 @@ if __name__ == "__main__":
         n_pts_spline_segment = 10
         generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, n_pts_spline_segment)
     
-    train_dataset = Spline_2D_Dataset(path_to_splines)[0]
+    train_dataset = Spline_2D_Dataset(path_to_splines)[1]
     train_dataloader = DataLoader(train_dataset, batch_size=100, shuffle=False)
     
-    valid_dataset = Spline_2D_Dataset(path_to_splines)[1]
+    valid_dataset = Spline_2D_Dataset(path_to_splines)[0]
     valid_dataloader = DataLoader(valid_dataset, batch_size=100, shuffle=False)
     
     output_path = 'out'
-    num_epochs = 90
+    num_epochs = 100
     
     rmse_errors = []
     chi2_errors = []
@@ -213,15 +220,20 @@ if __name__ == "__main__":
             graph.build_jacobians()
             graph.solve(mrob.FGraphDiff_LM)
             chi2 = graph.chi2()
-            toro_file = os.path.join(output_path, 'toro_file.txt')
-            with open(toro_file,'w') as f:
-                f.writelines(toro_lines)
-                f.close()
-
+            # toro_file = os.path.join(output_path, 'toro_file.txt')
+            # with open(toro_file,'w') as f:
+            #     f.writelines(toro_lines)
+            #     f.close()
             
             # dL_dz = numerical_diff2_3d_sparse(toro_file, dx=1e-5, dz=1e-4, parallel=False)
+            
+            # grad1 = numerical_diff1_3d(toro_file, dz=1e-5)
+            # grad2 = numerical_diff2_3d(toro_file, dx=1e-5, dz=1e-5)
+            # grad_analytical = graph.get_dx_dz()
+            
             dL_dz = graph.get_dx_dz()
             chi2_errors.append(chi2)
+            visualize_gradient(dL_dz, 'Analytical gradient', 'out')
            
             gt_poses_se3 = convert_to_se3(gt_poses.detach().cpu().numpy()) 
             delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
@@ -247,7 +259,6 @@ if __name__ == "__main__":
                 pred_poses_valid = model(noisy_poses)
                 graph_valid, _ = populate_graph(pred_poses_valid, gt_poses_valid)
                 graph_valid.solve()
-                # graph_valid.solve(mrob.LM)
                 chi2_valid = graph_valid.chi2()
                 delta_x_valid = compute_delta_x(convert_to_se3(gt_poses_valid.numpy()), graph_valid.get_estimated_state())
                 rmse_trans_valid = compute_rmse_and_yaw(graph_valid, convert_to_se3(gt_poses_valid.numpy()), delta_x_valid, epoch, plot=True, output_dir='out/poses_valid')

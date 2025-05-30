@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from spline_dataset.spline_diff import generate_imu_data
 from spline_dataset.spline_generation import generate_batch_of_splines
 
-def add_noise_to_poses(poses, pos_std=0.7):
+def add_noise_to_poses(poses, pos_std=4.0):
     poses = poses.clone() if isinstance(poses, torch.Tensor) else poses.copy()
 
     x = poses[:, 0]
@@ -37,7 +37,7 @@ def convert_to_se3(poses):
     se3_matrices = np.zeros((num_poses, 4, 4))
 
     for i, pose in enumerate(poses):
-        x, y, theta= pose
+        x, y, theta = pose
 
         R = np.array([
             [np.cos(theta), -np.sin(theta), 0],
@@ -56,52 +56,50 @@ def convert_to_se3(poses):
 
 
 class Spline_2D_Dataset(Dataset):
-    def __init__(self, spline_path, enable_noise=False):
-        self.imu_data = []
-        self.gt_velocity = []
-        self.gt_poses = []
-        self.gt_poses_se3 = []
+    def __init__(self, spline_path, window_size=20, stride=1, enable_noise=True):
+        self.samples = []
+        self.window_size = window_size
 
-        self.bias_acc = np.array([0, 0])
-        self.bias_w = np.array([0])
-        
-        self.Q_acc = np.diag([0.9**2, 0.9**2]) if enable_noise else np.zeros((2, 2))
+        self.bias_acc = np.array([0.1, 0.1])
+        self.bias_w = np.array([0.1])
+        self.Q_acc = np.diag([0.8**2, 0.8**2]) if enable_noise else np.zeros((2, 2))
         self.Q_w = np.diag([0.15**2]) if enable_noise else np.zeros((1, 1))
 
         paths = glob.glob(f'{spline_path}/spline_*.txt')
         print(f"Found {len(paths)} spline files.")
 
+        samples = []
         for path in tqdm(paths):
             spline_points = np.genfromtxt(path)
-            acc, gyro, tau, _, velocity, _ = generate_imu_data(spline_points)
+            acc, gyro, velocity, poses = generate_imu_data(spline_points)
+            w_z = gyro
 
             if enable_noise:
                 acc += np.random.multivariate_normal(self.bias_acc, self.Q_acc, acc.shape[0])
                 gyro += np.random.multivariate_normal(self.bias_w, self.Q_w, gyro.shape[0]).reshape(-1, 1)
 
-            imu = np.concatenate([acc, gyro], axis=1)
-            yaw = np.arctan2(tau[:, 1], tau[:, 0])
-            poses = np.concatenate([spline_points[:100], yaw[:100, None]], axis=1) # spline_points[:tau.shape[0]], tau] len(yaw)
-            se3 = convert_to_se3(poses)
+            imu = np.concatenate([acc, gyro], axis=1)  # [T, 3]
+            T = imu.shape[0]
 
-            self.imu_data.append(torch.tensor(imu, dtype=torch.float32).T)  # shape: [3, T]
-            self.gt_velocity.append(torch.tensor(velocity, dtype=torch.float32))  # [T, 2]
-            self.gt_poses.append(torch.tensor(poses, dtype=torch.float32))  # [T, 4]
-            self.gt_poses_se3.append(torch.tensor(se3, dtype=torch.float32))  # [T, 4, 4]
+            for i in range(0, T - window_size + 1, stride):
+                imu_win = imu[i:i + window_size].T  # [3, window]
+                vel_win = velocity[i:i + window_size]  # [window, 2]
+                pose_win = poses[i:i + window_size]  # [window, 3]
+                w_z_win = w_z[i:i + window_size]     # [window, 1]
+
+                sample = {
+                    'imu': torch.tensor(imu_win, dtype=torch.float32),            # [3, W]
+                    'gt_vel': torch.tensor(vel_win.mean(axis=0), dtype=torch.float32),  # [2]
+                    'gt_poses': torch.tensor(pose_win.mean(axis=0), dtype=torch.float32),# [3]
+                    'w_z': torch.tensor(w_z_win.mean(), dtype=torch.float32).unsqueeze(0)  # [1]
+                }
+                self.samples.append(sample)
 
     def __len__(self):
-        return len(self.imu_data)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        imu = self.imu_data[idx]            # [3, T], in **body frame**
-        velocity = self.gt_velocity[idx]    # [T, 2], in **world frame**
-        poses = self.gt_poses[idx]          # [T, 4], in **world frame** (x, y, cos, sin)
-        poses_se3 = self.gt_poses_se3[idx]  # [T, 4, 4], SE(3) world poses
-        
-        x = torch.tensor(add_noise_to_poses(poses), dtype=torch.float32)
-        y = poses.clone().float()
-
-        return x, y
+        return self.samples[idx]
 
 
 if __name__ == "__main__":
@@ -112,7 +110,7 @@ if __name__ == "__main__":
     number_of_control_nodes = 10
     generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
     
-    dataset = Spline_2D_Dataset(path_to_splines, enable_noise=False)
+    dataset = Spline_2D_Dataset(path_to_splines)
     print(len(dataset))
-    noisy_pose, gt_pose= dataset[0]
-    print(noisy_pose.shape, gt_pose.shape)
+    # noisy_pose, gt_pose= dataset[0]
+    # print(noisy_pose.shape, gt_pose.shape)

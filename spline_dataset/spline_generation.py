@@ -5,7 +5,7 @@ import os
 import shutil
 from matplotlib.backend_bases import MouseButton
 
-def bspline(cv, n=100, degree=3, periodic=False):
+def bspline(cv, n=100, degree=4, periodic=False):
     """Calculate n samples on a bspline."""
     cv = np.asarray(cv)
     count = len(cv)
@@ -72,7 +72,7 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
         rnd_pts = np.random.uniform(-5, 5, size=(n_control_points, 2))
         rnd_pts[:, 0] = np.linspace(0, 20, n_control_points)
 
-        spline_points = bspline(rnd_pts, n_control_points * n_pts_spline_segment, 3)
+        spline_points = bspline(rnd_pts, n_control_points * n_pts_spline_segment, 4)
         plt.plot(spline_points[:, 0], spline_points[:, 1], marker='o', markersize=0.5)
         np.savetxt(f'{out_path}/spline_{b}.txt', spline_points)
 
