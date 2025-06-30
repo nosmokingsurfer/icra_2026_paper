@@ -6,7 +6,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 import os
@@ -21,6 +21,7 @@ from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
 from ronin.ronin_resnet import get_model
 from ronin.ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
+from ronin.model_temporal import TCNSeqNetwork
 
 def plot_losses(chi2_losses, rmse_losses, labels=("Chi²", "RMSE"), title="Losses", output_path=None):
     epochs = list(range(len(chi2_losses)))
@@ -55,49 +56,33 @@ def compute_delta_x(gt_poses, estimated_poses):
     return np.array(result_Ln)
 
 
-def integrate_pred_vel(pred_vel, w_z, gt_pose0, dt=0.01):
-    """
-    Integrate predicted world-frame velocities and yaw rates into poses.
-
-    Args:
-        pred_vel: [T, 2] - velocities in world frame
-        w_z:      [T] or [T, 1] - yaw rate in rad/s
-        gt_pose0: [3] - initial pose (x, y, yaw) as tensor
-        dt:       float - time step duration
-
-    Returns:
-        pred_poses: [T, 3] - integrated poses (x, y, yaw)
-    """
-    if w_z.ndim == 2:
-        w_z = w_z.squeeze(-1)
+def integrate_pred_vel(pred_vel, gt_poses, gt_pose0, dt=0.01):
+    T = pred_vel.shape[0]
+    poses = torch.zeros((T, 3), dtype=pred_vel.dtype, device=pred_vel.device)
 
     x, y, yaw = gt_pose0[0], gt_pose0[1], gt_pose0[2]
-    pred_poses = []
+    poses[0] = torch.stack([x, y, yaw])
 
-    for i in range(pred_vel.shape[0]):
-        vx, vy = pred_vel[i][0], pred_vel[i][1]
-        wz = w_z[i]
+    for t in range(1, T):
+        vx, vy = pred_vel[t - 1]
 
-        yaw = yaw + wz * dt
         x = x + vx * dt
         y = y + vy * dt
+        yaw = gt_poses[t, 2]  # directly use GT yaw
 
-        pose = torch.stack([x, y, yaw])
-        pred_poses.append(pose)
+        poses[t] = torch.stack([x, y, yaw])
 
-    return torch.stack(pred_poses)  # [T, 3]
+    return poses
 
 
 def populate_graph(pred_poses, gt_poses):
     graph = mrob.FGraphDiff()
-    # toro_container = ToRoContainer()
-    
-    W_odo = torch.eye(6) * 0.03
-    W_gps = torch.eye(6) * 0.1
+
+    W_odo = torch.eye(6) * 10.0
+    W_gps = torch.eye(6) * 1.0
 
     node_ids = []
     T_nodes = []
-    T_pred = []
     T = pred_poses.shape[0]
     
     # Initialize nodes using predicted poses (world frame)
@@ -107,27 +92,19 @@ def populate_graph(pred_poses, gt_poses):
         T_nodes.append(T_i)
         node_id = graph.add_node_pose_3d(T_i)
         node_ids.append(node_id)
-        # toro_container.add_node_pose_3d(node_id, T_i.Ln())
-        
-    for i in range(T): # неподвижная система координат
-        pose_i = pred_poses[i].detach().cpu().numpy()
-        T_pred_i = mrob.SE3(convert_to_se3(pose_i))
-        T_pred.append(T_pred_i)    
 
     # Odometry factors from predicted poses
-    for i in range(len(node_ids) - 1): # source system coordinate 
-        T_pred_i   = T_pred[i]
-        T_pred_ip1 = T_pred[i + 1]
+    for i in range(len(node_ids) - 1):
+        T_pred_i   = T_nodes[i]
+        T_pred_ip1 = T_nodes[i + 1]
         T_odo = T_pred_i.inv() * T_pred_ip1 #mrob.SE3(pred_v, w (from IMU))
         graph.add_factor_2poses_3d_diff(T_odo, node_ids[i], node_ids[i + 1], W_odo.numpy())
-        # toro_container.add_factor_2poses_3d(node_ids[i], node_ids[i + 1], T_odo.Ln(), W_odo.numpy())
-    
+
     # GPS factors from GT poses
     for i in range(len(node_ids)):
-        if i % 2 == 0 or i == len(node_ids) - 1:
-            T_gps = mrob.SE3(convert_to_se3(gt_poses[i].detach().cpu().numpy()))
-            graph.add_factor_1pose_3d_diff(T_gps, node_ids[i], W_gps.numpy())
-        # toro_container.add_factor_1pose_3d(node_ids[i], T_gps.Ln(), W_gps.numpy()) toro_container.get_lines()
+        # if i % 10 == 0 or i == len(node_ids) - 1:
+        T_gps = mrob.SE3(convert_to_se3(gt_poses[i].detach().cpu().numpy()))
+        graph.add_factor_1pose_3d_diff(T_gps, node_ids[i], W_gps.numpy())
     
     return graph
 
@@ -232,6 +209,14 @@ def make_gif_from_figures(folder_path, output_path="graph_evolution.gif", num_ep
     print(f"GIF saved to {output_path}")
 
 
+def plot_integrated_vel(poses_1, poses_2):
+    plt.figure()
+    plt.plot(poses_1[:, 0].detach(), poses_1[:, 1].detach(), marker='o', label='integrated')
+    plt.plot(poses_2[:, 0].detach(), poses_2[:, 1].detach(), marker='o', label='gt')
+    plt.legend()
+    plt.show()
+    return
+
 if __name__ == "__main__":
     model = ResNet1D(
         num_inputs=3,       
@@ -242,121 +227,151 @@ if __name__ == "__main__":
         output_block=FCOutputModule,  
         kernel_size=3,
         fc_dim=512,             
-        in_dim=7,            
+        in_dim=1,            
         dropout=0.5,
         trans_planes=128
     )
-    # model.load_state_dict(torch.load("out/model.pth"))
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    
+    # model.load_state_dict(torch.load("out/model_fgo.pth"))
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+
     criterion = nn.MSELoss()
-    path_to_splines = "./out/splines_"
-    
+
+    output_path = './out/'
+    if not os.path.exists(output_path):
+        os.makedirs(output_path,exist_ok=True)
+    path_to_splines = output_path + 'splines'
+
+    number_of_splines = 10
     if not os.path.exists(path_to_splines):
-        number_of_splines = 1
         number_of_control_nodes = 10
-        n_pts_spline_segment = 50
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, n_pts_spline_segment)
+        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
+        
+    window_size = 10
+    dataset = Spline_2D_Dataset(path_to_splines, window=window_size, enable_noise= not True)
+
+    train_len = 8
+    valid_len = 2
     
-    train_dataset = Spline_2D_Dataset(path_to_splines, window_size=100, stride=10)
-    print(f'Train dataset size: {train_dataset.__len__()}')
-    train_dataloader = DataLoader(train_dataset, batch_size=train_dataset.__len__(), shuffle=False)
+    print(f'Train dataset length: {train_len}, Validation dataset length: {valid_len}')
     
-    # valid_dataset = Spline_2D_Dataset(path_to_splines)[0]
-    # valid_dataloader = DataLoader(valid_dataset, batch_size=100, shuffle=False)
+    train_dataset, valid_dataset = random_split(dataset,[train_len, valid_len])
+
+    train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=False)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=1, shuffle=False)
     
     output_path = 'out'
     num_epochs = 100
     
     rmse_errors = []
     chi2_errors = []
+    valid_chi2_errors = []
+    valid_rmse_errors = []
     
-    # rmse_errors_valid = []
-    # chi2_errors_valid = []
+    alpha = 0.0
+    dt = window_size / 100
     
-    for epoch in tqdm((range(num_epochs))):
+    for epoch in range(num_epochs):
+        total_chi2 = 0.0
+        total_rmse = 0.0
+        train_batches = 0.0
         model.train()
-        for sample in train_dataloader:
-            imu = sample['imu']
-            gt_vel = sample['gt_vel']
-            gt_poses = sample['gt_poses']
-            w_z = sample['w_z']
-            pred_vel = model(imu)
-            
-            N = gt_vel.shape[0]
-            
-            dt = 0.1
-            pred_poses = integrate_pred_vel(pred_vel, w_z, gt_poses[0], dt=dt)
-            graph = populate_graph(pred_poses, gt_poses)
+        for imu_seq, velocity_seq, pose_seq, w_z_seq in train_dataloader:
+            imu_seq = imu_seq.squeeze(0)       # [num_windows, 3, W]
+            velocity_seq = velocity_seq.squeeze(0)  # [num_windows, 2]
+            pose_seq = pose_seq.squeeze(0)     # [num_windows, 3]
+            w_z_seq = w_z_seq.squeeze(0).squeeze(-1)  # [num_windows]
+
+            pred_vel_seq = model(imu_seq) # [num_windows, 2]
+
+            # integrate into poses
+            pred_poses = integrate_pred_vel(pred_vel_seq, pose_seq, pose_seq[0], dt=dt)
+            if epoch == num_epochs - 1:
+                plot_integrated_vel(pred_poses, pose_seq)
+
+            graph = populate_graph(pred_poses, pose_seq)
             graph.build_jacobians()
-            # plt.figure()
-            # plt.plot(gt_poses[:, 0].detach(), gt_poses[:, 1].detach(), label='gt')
-            # plt.plot(pred_poses[:, 0].detach(), pred_poses[:, 1].detach(), label='pred')
-            # plt.legend()
-            # plt.show()
-            # plt.close('all')
-            graph.solve(mrob.FGraphDiff_LM, maxIters=100, solutionTolerance=1e-8, lambdaParam = 1e-6)
+            graph.solve(mrob.FGraphDiff_LM, maxIters=100) 
+            
+            N = velocity_seq.shape[0]
+
+            graph.solve(mrob.FGraphDiff_LM, maxIters=100)
             chi2 = graph.chi2()
             
             dL_dz = graph.get_dx_dz()
             dL_dz /= dt
-            chi2_errors.append(chi2)
-            visualize_gradient(dL_dz, 'Analytical gradient', 'out', epoch)
+
+            # visualize_gradient(dL_dz, 'Analytical gradient', 'out', epoch)
            
-            gt_poses_se3 = convert_to_se3(gt_poses.detach().cpu().numpy()) 
+            gt_poses_se3 = convert_to_se3(pose_seq.detach().cpu().numpy()) 
             delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
             delta_x_flat = delta_x.reshape(-1)
             # delta_x_flat = delta_x_flat / (np.linalg.norm(delta_x_flat) + 1e-8)
             
             rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir='out/poses_train')
-            rmse_errors.append(rmse_trans)
             
-            mult = (delta_x_flat @ dL_dz)[0:(N * 6)].reshape(-1, 6)
+            mult = (delta_x_flat @ dL_dz)[0:(N * 6)].reshape(-1, 6) #
             mult_tensor = torch.from_numpy(np.array(mult)).float()
 
-            grad_final = mult_tensor[:, [3, 4]]
-            # grad_final = 1e-3 * grad_final
+            grad_final = -mult_tensor[:, [3, 4]]
 
-            assert pred_vel.requires_grad
+            pred_vel_seq.backward(gradient=grad_final.type(torch.float32))
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             
-
-            pred_vel.backward(gradient=grad_final.type(torch.float32))
-            # for name, param in model.named_parameters():
-            #     if param.grad is not None:
-            #         print(f"{name}: grad norm = {param.grad.norm().item():.4f}")
-            #     else:
-            #         print(f"{name}: No gradient")
-
-            # print("Clipped total grad norm:", total_norm.item())
-            # pre_clip = torch.norm(torch.stack([p.grad.norm() for p in model.parameters() if p.grad is not None]))
-            # print(f"Pre-clip grad norm: {pre_clip.item()}")
-
-            # clip_val = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+            total_chi2 += chi2
+            total_rmse += rmse_trans
+            train_batches += 1
 
             # grad_norm = torch.norm(torch.stack([p.grad.norm() for p in model.parameters() if p.grad is not None]))
             # print(f"Grad norm: {grad_norm.item()}")
-            # print(model.parameters())
             
             optimizer.step()
             optimizer.zero_grad()
             
-    #     model.eval()
-    #     with torch.no_grad():
-    #         for noisy_poses_valid, gt_poses_valid in valid_dataloader:
-    #             pred_poses_valid = model(noisy_poses)
-    #             graph_valid, _ = populate_graph(pred_poses_valid, gt_poses_valid)
-    #             graph_valid.solve()
-    #             chi2_valid = graph_valid.chi2()
-    #             delta_x_valid = compute_delta_x(convert_to_se3(gt_poses_valid.numpy()), graph_valid.get_estimated_state())
-    #             rmse_trans_valid = compute_rmse_and_yaw(graph_valid, convert_to_se3(gt_poses_valid.numpy()), delta_x_valid, epoch, plot=True, output_dir='out/poses_valid')
-    #             rmse_errors_valid.append(rmse_trans_valid)
-    #             chi2_errors_valid.append(chi2_valid)
-            
-    #     print(f"Epoch {epoch}")
-        print(f"Chi2 on training: {chi2}, RMSE on training: {rmse_trans}")
-    #     print(f"Chi2 on validation: {chi2_valid}, RMSE on validation: {rmse_trans_valid}") 
+        scheduler.step()
+        chi2_errors.append(total_chi2 / len(train_dataloader))
+        rmse_errors.append(rmse_trans / len(train_dataloader))
+        
+        # Validation loop 
+        # model.eval()
+        # val_total_chi2 = 0.0
+        # val_total_rmse = 0.0
+        # val_batches = 0
 
+        # with torch.no_grad():
+        #     for imu_seq, velocity_seq, pose_seq, w_z_seq in valid_dataloader:
+        #         imu_seq = imu_seq.squeeze(0)       # [num_windows, 3, W]
+        #         velocity_seq = velocity_seq.squeeze(0)  # [num_windows, 2]
+        #         pose_seq = pose_seq.squeeze(0)     # [num_windows, 3]
+        #         w_z_seq = w_z_seq.squeeze(0).squeeze(-1)  # [num_windows]
+
+        #         pred_vel_seq = model(imu_seq)
+        #         pred_poses = integrate_pred_vel(pred_vel_seq, pose_seq, pose_seq[0], dt=dt)
+
+        #         graph = populate_graph(pred_poses, pose_seq)
+        #         graph.build_jacobians()
+        #         graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+
+        #         chi2 = graph.chi2()
+
+        #         gt_poses_se3 = convert_to_se3(pose_seq.detach().cpu().numpy()) 
+        #         delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
+
+        #         rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir='out/poses_valid')
+
+        #         val_total_chi2 += chi2
+        #         val_total_rmse += rmse_trans
+        #         val_batches += 1
+
+        #         valid_chi2_errors.append(val_total_chi2 / val_batches)
+        #         valid_rmse_errors.append(val_total_rmse / val_batches)
+                
+        print(f"Epoch {epoch}, [Training] Chi2: {total_chi2 / train_batches:.5f}, RMSE: {rmse_trans / train_batches:.5f}")
+        # print(f"Epoch {epoch}, [Validation] Chi2: {val_total_chi2 / val_batches:.5f}, RMSE: {val_total_rmse / val_batches:.5f}")
+    torch.save(model.state_dict(), "out/model.pth")
     plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Train Losses', f'{output_path}/train_losses.png')
-    make_gif_from_figures(f'{output_path}/poses_train', output_path=f'{output_path}/train_graph_evolution.gif', num_epochs=num_epochs)
+    # plot_losses(valid_chi2_errors, valid_rmse_errors, ('Chi2', 'RMSE'), 'Valid Losses', f'{output_path}/valid_losses.png')
     
-    # plot_losses(chi2_errors_valid, rmse_errors_valid, ('Chi2', 'RMSE'), 'Valid Losses', f'{output_path}/valid_losses.png')
-    # make_gif_from_figures(f'{output_path}/poses_valid', output_path=f'{output_path}/valid_graph_evolution.gif')
+    make_gif_from_figures(f'{output_path}/poses_train', output_path=f'{output_path}/train_graph_evolution.gif', num_epochs=num_epochs)
+    # make_gif_from_figures(f'{output_path}/poses_valid', output_path=f'{output_path}/valid_graph_evolution.gif', num_epochs=num_epochs)

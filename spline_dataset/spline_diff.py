@@ -25,10 +25,10 @@ def generate_imu_data(data, sampling_rate=100):
     acc = np.diff(velocity, axis=0) / dt #TODO remove projection, return acc 
 
     # Accelerometer measurements (projected on tau and n)
-    # acc_measurements = np.zeros_like(acc)
-    # for i in range(len(acc)):
-    #     acc_measurements[i, 0] = np.dot(acc[i], tau[i])
-    #     acc_measurements[i, 1] = np.dot(acc[i], n[i])
+    acc_measurements = np.zeros_like(acc)
+    for i in range(len(acc)):
+        acc_measurements[i, 0] = np.dot(acc[i], tau[i])
+        acc_measurements[i, 1] = np.dot(acc[i], n[i])
 
     acc_measurements = acc
 
@@ -50,21 +50,13 @@ def generate_imu_data(data, sampling_rate=100):
     velocity = velocity[:N]
     time = dt * np.arange(N)
     
-    # yaw[0] = 0.0
-    # for i in range(1, len(yaw)):
-    #     delta_angle = np.arctan2(
-    #         np.cross(tau[i - 1], tau[i]),
-    #         np.dot(tau[i - 1], tau[i])
-    #     )
-    #     yaw[i] = yaw[i - 1] + delta_angle
-    
     yaw = np.arctan2(tau[:, 1], tau[:, 0])
     
     poses = np.concatenate([data[1:N+1], yaw[:N, None]], axis=1)
     
     assert acc_measurements.shape[0] == gyro_measurements.shape[0], "Mismatch between acc and gyro lengths"
 
-    return acc_measurements, gyro_measurements.reshape(-1, 1), velocity, poses
+    return acc_measurements, gyro_measurements.reshape(-1, 1), velocity, poses, tau
 
 
 def visualize_imu_data(data, acc_measurements, gyro_measurements):
