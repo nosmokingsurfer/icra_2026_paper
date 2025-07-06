@@ -227,7 +227,7 @@ if __name__ == "__main__":
         output_block=FCOutputModule,  
         kernel_size=3,
         fc_dim=512,             
-        in_dim=1,            
+        in_dim=7,            
         dropout=0.5,
         trans_planes=128
     )
@@ -248,130 +248,80 @@ if __name__ == "__main__":
         number_of_control_nodes = 10
         generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
         
-    window_size = 10
+    window_size = 100
+    
     dataset = Spline_2D_Dataset(path_to_splines, window=window_size, enable_noise= not True)
 
-    train_len = 8
-    valid_len = 2
-    
-    print(f'Train dataset length: {train_len}, Validation dataset length: {valid_len}')
-    
-    train_dataset, valid_dataset = random_split(dataset,[train_len, valid_len])
-
-    train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=False)
-    valid_dataloader = DataLoader(valid_dataset, batch_size=1, shuffle=False)
-    
-    output_path = 'out'
-    num_epochs = 100
-    
+    train_dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    dt = window_size / 100
     rmse_errors = []
     chi2_errors = []
-    valid_chi2_errors = []
-    valid_rmse_errors = []
     
-    alpha = 0.0
-    dt = window_size / 100
-    
-    for epoch in range(num_epochs):
-        total_chi2 = 0.0
-        total_rmse = 0.0
-        train_batches = 0.0
+    for epoch in range(100):
+        total_chi2, total_rmse = 0.0, 0.0
         model.train()
-        for imu_seq, velocity_seq, pose_seq, w_z_seq in train_dataloader:
-            imu_seq = imu_seq.squeeze(0)       # [num_windows, 3, W]
-            velocity_seq = velocity_seq.squeeze(0)  # [num_windows, 2]
-            pose_seq = pose_seq.squeeze(0)     # [num_windows, 3]
-            w_z_seq = w_z_seq.squeeze(0).squeeze(-1)  # [num_windows]
-
-            pred_vel_seq = model(imu_seq) # [num_windows, 2]
-
-            # integrate into poses
-            pred_poses = integrate_pred_vel(pred_vel_seq, pose_seq, pose_seq[0], dt=dt)
-            if epoch == num_epochs - 1:
-                plot_integrated_vel(pred_poses, pose_seq)
-
-            graph = populate_graph(pred_poses, pose_seq)
-            graph.build_jacobians()
-            graph.solve(mrob.FGraphDiff_LM, maxIters=100) 
-            
-            N = velocity_seq.shape[0]
-
-            graph.solve(mrob.FGraphDiff_LM, maxIters=100)
-            chi2 = graph.chi2()
-            
-            dL_dz = graph.get_dx_dz()
-            dL_dz /= dt
-
-            # visualize_gradient(dL_dz, 'Analytical gradient', 'out', epoch)
-           
-            gt_poses_se3 = convert_to_se3(pose_seq.detach().cpu().numpy()) 
-            delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
-            delta_x_flat = delta_x.reshape(-1)
-            # delta_x_flat = delta_x_flat / (np.linalg.norm(delta_x_flat) + 1e-8)
-            
-            rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir='out/poses_train')
-            
-            mult = (delta_x_flat @ dL_dz)[0:(N * 6)].reshape(-1, 6) #
-            mult_tensor = torch.from_numpy(np.array(mult)).float()
-
-            grad_final = -mult_tensor[:, [3, 4]]
-
-            pred_vel_seq.backward(gradient=grad_final.type(torch.float32))
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-            
-            total_chi2 += chi2
-            total_rmse += rmse_trans
-            train_batches += 1
-
-            # grad_norm = torch.norm(torch.stack([p.grad.norm() for p in model.parameters() if p.grad is not None]))
-            # print(f"Grad norm: {grad_norm.item()}")
-            
-            optimizer.step()
-            optimizer.zero_grad()
-            
-        scheduler.step()
-        chi2_errors.append(total_chi2 / len(train_dataloader))
-        rmse_errors.append(rmse_trans / len(train_dataloader))
         
-        # Validation loop 
-        # model.eval()
-        # val_total_chi2 = 0.0
-        # val_total_rmse = 0.0
-        # val_batches = 0
+        for imu_seq, vel_seq, gt_pose_seq in train_dataloader:
+            # imu_seq: [B, M, 3, W]
+            # vel_seq: [B, M, 2]
+            B, M, _, W = imu_seq.shape
+            imu_seq = imu_seq.to('cpu')
+            vel_seq = vel_seq.to('cpu')
 
-        # with torch.no_grad():
-        #     for imu_seq, velocity_seq, pose_seq, w_z_seq in valid_dataloader:
-        #         imu_seq = imu_seq.squeeze(0)       # [num_windows, 3, W]
-        #         velocity_seq = velocity_seq.squeeze(0)  # [num_windows, 2]
-        #         pose_seq = pose_seq.squeeze(0)     # [num_windows, 3]
-        #         w_z_seq = w_z_seq.squeeze(0).squeeze(-1)  # [num_windows]
+            vel_pred_list = []
+            for b in range(B):
+                vel_slices = []
+                for m in range(M):
+                    inp = imu_seq[b, m]                 # [3, W]
+                    out = model(inp.unsqueeze(0))       # [1, 2]
+                    vel_slices.append(out.squeeze(0))   # [2]
+                vel_b = torch.stack(vel_slices)         # [M, 2]
+                vel_pred_list.append(vel_b)
 
-        #         pred_vel_seq = model(imu_seq)
-        #         pred_poses = integrate_pred_vel(pred_vel_seq, pose_seq, pose_seq[0], dt=dt)
+            vel_pred = torch.stack(vel_pred_list)
+            optimizer.zero_grad()
 
-        #         graph = populate_graph(pred_poses, pose_seq)
-        #         graph.build_jacobians()
-        #         graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+            all_graphs = []
+            all_delta_x = []
+            all_dL_dz = []
 
-        #         chi2 = graph.chi2()
-
-        #         gt_poses_se3 = convert_to_se3(pose_seq.detach().cpu().numpy()) 
-        #         delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())
-
-        #         rmse_trans = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=True, output_dir='out/poses_valid')
-
-        #         val_total_chi2 += chi2
-        #         val_total_rmse += rmse_trans
-        #         val_batches += 1
-
-        #         valid_chi2_errors.append(val_total_chi2 / val_batches)
-        #         valid_rmse_errors.append(val_total_rmse / val_batches)
+            for b in range(B):
+                # Step 1: integrate vel_pred[b] into poses
+                pred_poses = integrate_pred_vel(vel_pred[b], gt_pose_seq[b], gt_pose_seq[b, 0], dt=dt)  # [M, 3]
                 
-        print(f"Epoch {epoch}, [Training] Chi2: {total_chi2 / train_batches:.5f}, RMSE: {rmse_trans / train_batches:.5f}")
-        # print(f"Epoch {epoch}, [Validation] Chi2: {val_total_chi2 / val_batches:.5f}, RMSE: {val_total_rmse / val_batches:.5f}")
-    torch.save(model.state_dict(), "out/model.pth")
-    plot_losses(chi2_errors, rmse_errors, ('Chi2', 'RMSE'), 'Train Losses', f'{output_path}/train_losses.png')
-    # plot_losses(valid_chi2_errors, valid_rmse_errors, ('Chi2', 'RMSE'), 'Valid Losses', f'{output_path}/valid_losses.png')
-    
-    make_gif_from_figures(f'{output_path}/poses_train', output_path=f'{output_path}/train_graph_evolution.gif', num_epochs=num_epochs)
-    # make_gif_from_figures(f'{output_path}/poses_valid', output_path=f'{output_path}/valid_graph_evolution.gif', num_epochs=num_epochs)
+                # Step 2: build & solve graph
+                graph = populate_graph(pred_poses, gt_pose_seq[b])  # FGraphDiff
+                graph.build_jacobians()
+                graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+                dL_dz = graph.get_dx_dz() / dt  # [6M, 6M]
+
+                # Step 3: compute delta_x
+                gt_poses_se3 = convert_to_se3(gt_pose_seq[b].detach().cpu().numpy())
+                delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())  # [M, 6]
+                delta_x_flat = delta_x.reshape(-1)  # [6M]
+
+                all_dL_dz.append(dL_dz)
+                all_delta_x.append(delta_x_flat)
+
+                chi2 = graph.chi2()
+                rmse = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=False)
+                total_chi2 += chi2
+                total_rmse += rmse
+
+            # Step 4: compute gradient per sample and stack
+            all_grads = []
+            for b in range(B):
+                grad = (all_delta_x[b] @ all_dL_dz[b])[0:(M * 6)].reshape(-1, 6)
+                grad_final = torch.from_numpy(grad[:, [3, 4]]).float().to(vel_pred.device)  # [M, 2]
+                all_grads.append(grad_final)
+
+            grad_tensor = torch.stack(all_grads)  # [B, M, 2]
+            vel_pred.backward(gradient=-grad_tensor)
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+            optimizer.step()
+        
+        chi2_errors.append(total_chi2 / len(train_dataloader))
+        rmse_errors.append(total_rmse / len(train_dataloader))
+
+        print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")

@@ -181,71 +181,78 @@ class Spline_2D_Dataset_old():
         w_z = torch.tensor(self.w_z[idx], dtype=torch.float32)
         return imu, velocity, poses, w_z
 
-class Spline_2D_Dataset(Dataset):
-    def __init__(self, spline_path, window=100, enable_noise=False):
-        self.window = window
 
+class Spline_2D_Dataset(Dataset):
+    def __init__(self, spline_path, window=100, subseq_len=4, enable_noise=False):
+        self.window = window
+        self.subseq_len = subseq_len
+        self.subsequences = []  # List of (experiment_idx, start_idx)
 
         self.bias_acc = np.array([0, 0])
         self.Q_acc = np.diag([0.9**2, 0.9**2]) if enable_noise else np.zeros((2, 2))
         self.bias_w = np.array([0])
         self.Q_w = np.array([[0.15**2]]) if enable_noise else np.zeros((1, 1))
 
+        self.all_slices = []     # List of [num_slices, window, 3]
+        self.all_velocities = [] # List of [num_slices, 2]
+        self.all_gt_poses = []   # List of [num_slices, 3]
+
         paths = glob.glob(f'{spline_path}/spline_*.txt')
         print(f"Found {len(paths)} splines in path: {spline_path}")
 
-        self.slices = []
-        self.gt_velocity = []
-        self.gt_poses = []
-        self.w_z = []
-
-        for path in tqdm(paths):
+        for exp_id, path in enumerate(tqdm(paths)):
             spline_points = np.genfromtxt(path)
             acc, gyro, velocity, poses, tau = generate_imu_data(spline_points)
 
-            number_elements_to_cut = 10
-            acc = acc[number_elements_to_cut:-number_elements_to_cut]
-            gyro = gyro[number_elements_to_cut:-number_elements_to_cut]
-            velocity = velocity[number_elements_to_cut:-number_elements_to_cut]
-            poses = poses[number_elements_to_cut:-number_elements_to_cut]
+            acc = acc[10:-10]
+            gyro = gyro[10:-10]
+            velocity = velocity[10:-10]
+            poses = poses[10:-10]
 
             tmp_data = np.concatenate((acc, gyro), axis=1)
-            slice_num = tmp_data.shape[0] // self.window
+            num_slices = tmp_data.shape[0] // window
 
-            slices_per_spline = []
-            vel_per_spline = []
-            poses_per_spline = []
-            gyro_per_spline = []
+            if num_slices < subseq_len:
+                continue  # Skip if not enough slices for a full subsequence
 
-            for i in range(slice_num):
-                temp_slice = tmp_data[i * self.window:(i + 1) * self.window]
+            slices = []
+            vel_list = []
+            pose_list = []
+
+            for i in range(num_slices):
+                imu_slice = tmp_data[i * window:(i + 1) * window]
 
                 acc_noise = np.random.multivariate_normal(self.bias_acc, self.Q_acc, self.window)
                 omega_noise = np.random.multivariate_normal(self.bias_w, self.Q_w, self.window)
 
-                temp_slice[:, :2] += acc_noise
-                temp_slice[:, 2:] += omega_noise
+                imu_slice[:, :2] += acc_noise
+                imu_slice[:, 2:] += omega_noise
 
-                slices_per_spline.append(temp_slice)
-                vel_per_spline.append(velocity[i * self.window])
-                poses_per_spline.append(poses[i * self.window])
-                gyro_per_spline.append(gyro[i * self.window])
+                slices.append(imu_slice)
+                vel_list.append(velocity[i * window])
+                pose_list.append(poses[i * window])
 
-            self.slices.append(np.stack(slices_per_spline))      # [num_windows, W, 3]
-            self.gt_velocity.append(np.stack(vel_per_spline))    # [num_windows, 2]
-            self.gt_poses.append(np.stack(poses_per_spline))     # [num_windows, 3]
-            self.w_z.append(np.stack(gyro_per_spline))           # [num_windows, 1]
+            self.all_slices.append(np.stack(slices))        # [num_slices, window, 3]
+            self.all_velocities.append(np.stack(vel_list))  # [num_slices, 2]
+            self.all_gt_poses.append(np.stack(pose_list))   # [num_slices, 3]
+
+            for start_idx in range(0, num_slices - subseq_len + 1):
+                self.subsequences.append((exp_id, start_idx))
 
     def __len__(self):
-        return len(self.slices)  # each entry is one full spline (multiple windows)
+        return len(self.subsequences)
 
     def __getitem__(self, idx):
-        imu_seq = torch.tensor(self.slices[idx], dtype=torch.float32).permute(0, 2, 1)  # [num_windows, 3, W]
-        velocity = torch.tensor(self.gt_velocity[idx], dtype=torch.float32)            # [num_windows, 2]
-        poses = torch.tensor(self.gt_poses[idx], dtype=torch.float32)                  # [num_windows, 3]
-        w_z = torch.tensor(self.w_z[idx], dtype=torch.float32)                         # [num_windows, 1]
-        return imu_seq, velocity, poses, w_z
+        exp_id, start_idx = self.subsequences[idx]
+        slices = self.all_slices[exp_id][start_idx:start_idx + self.subseq_len]       # [M, window, 3]
+        velocities = self.all_velocities[exp_id][start_idx:start_idx + self.subseq_len]  # [M, 2]
+        gt_poses = self.all_gt_poses[exp_id][start_idx:start_idx + self.subseq_len]   # [M, 3]
 
+        imu_seq = torch.tensor(slices, dtype=torch.float32).permute(0, 2, 1)          # [M, 3, window]
+        vel_seq = torch.tensor(velocities, dtype=torch.float32)                      # [M, 2]
+        gt_pose_seq = torch.tensor(gt_poses, dtype=torch.float32)                    # [M, 3]
+
+        return imu_seq, vel_seq, gt_pose_seq
     
 
 if __name__ == "__main__":
