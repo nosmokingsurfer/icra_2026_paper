@@ -11,7 +11,11 @@ import matplotlib.pyplot as plt
 import imageio.v2 as imageio
 import os
 import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from pathlib import Path
+sys.path.insert(0,str(Path('../ronin/source/').resolve()))
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from torch.multiprocessing import Pool
 
 from mrob_num_diff.graph_generator import ToRoContainer, compare_gradients
 from mrob_num_diff.num_diff import find_factor_coord_idx, visualize_gradient
@@ -19,9 +23,9 @@ from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_spa
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
-from ronin.ronin_resnet import get_model
-from ronin.ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
-from ronin.model_temporal import TCNSeqNetwork
+from ronin_resnet import get_model
+from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
+from model_temporal import TCNSeqNetwork
 
 def plot_losses(chi2_losses, rmse_losses, labels=("Chi²", "RMSE"), title="Losses", output_path=None):
     epochs = list(range(len(chi2_losses)))
@@ -217,6 +221,7 @@ def plot_integrated_vel(poses_1, poses_2):
     plt.show()
     return
 
+
 if __name__ == "__main__":
     model = ResNet1D(
         num_inputs=3,       
@@ -243,47 +248,38 @@ if __name__ == "__main__":
         os.makedirs(output_path,exist_ok=True)
     path_to_splines = output_path + 'splines'
 
-    number_of_splines = 10
+    number_of_splines = 20
     if not os.path.exists(path_to_splines):
         number_of_control_nodes = 10
         generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
         
     window_size = 100
     
-    dataset = Spline_2D_Dataset(path_to_splines, window=window_size, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=3, enable_noise= not True)
 
-    train_dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    train_dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
     dt = window_size / 100
     rmse_errors = []
     chi2_errors = []
     
-    for epoch in range(100):
+    for epoch in range(10):
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
         
-        for imu_seq, vel_seq, gt_pose_seq in train_dataloader:
-            # imu_seq: [B, M, 3, W]
-            # vel_seq: [B, M, 2]
-            B, M, _, W = imu_seq.shape
-            imu_seq = imu_seq.to('cpu')
-            vel_seq = vel_seq.to('cpu')
+        for imu_seq, vel_seq, gt_pose_seq in tqdm(train_dataloader):
+            # imu_seq: [B, S, 3, W]
+            # vel_seq: [B, S, 2]
+            B, S, C, W = imu_seq.shape
 
-            vel_pred_list = []
-            for b in range(B):
-                vel_slices = []
-                for m in range(M):
-                    inp = imu_seq[b, m]                 # [3, W]
-                    out = model(inp.unsqueeze(0))       # [1, 2]
-                    vel_slices.append(out.squeeze(0))   # [2]
-                vel_b = torch.stack(vel_slices)         # [M, 2]
-                vel_pred_list.append(vel_b)
-
-            vel_pred = torch.stack(vel_pred_list)
+            # running model inference for all slices at once
+            vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
+            
             optimizer.zero_grad()
 
             all_graphs = []
             all_delta_x = []
             all_dL_dz = []
+            all_grads = []
 
             for b in range(B):
                 # Step 1: integrate vel_pred[b] into poses
@@ -308,14 +304,12 @@ if __name__ == "__main__":
                 total_chi2 += chi2
                 total_rmse += rmse
 
-            # Step 4: compute gradient per sample and stack
-            all_grads = []
-            for b in range(B):
-                grad = (all_delta_x[b] @ all_dL_dz[b])[0:(M * 6)].reshape(-1, 6)
-                grad_final = torch.from_numpy(grad[:, [3, 4]]).float().to(vel_pred.device)  # [M, 2]
+                # Step 4: compute gradient per sample and stack
+                grad = (all_delta_x[b] @ all_dL_dz[b])[0:(S * 6)].reshape(-1, 6)
+                grad_final = torch.from_numpy(grad[:, [3, 4]]).float().to(vel_pred.device)  # [S, 2]
                 all_grads.append(grad_final)
 
-            grad_tensor = torch.stack(all_grads)  # [B, M, 2]
+            grad_tensor = torch.stack(all_grads)  # [B, S, 2]
             vel_pred.backward(gradient=-grad_tensor)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
@@ -325,3 +319,7 @@ if __name__ == "__main__":
         rmse_errors.append(total_rmse / len(train_dataloader))
 
         print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
+
+    plt.plot(chi2_errors)
+    plt.plot(rmse_errors)
+    plt.show()

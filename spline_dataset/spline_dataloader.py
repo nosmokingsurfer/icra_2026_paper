@@ -183,74 +183,120 @@ class Spline_2D_Dataset_old():
 
 
 class Spline_2D_Dataset(Dataset):
-    def __init__(self, spline_path, window=100, subseq_len=4, enable_noise=False):
+    """
+        Reads synthetic generated spline data and prepares subsequences of overlapping 
+        slices of IMU data with shape [S,W,C], where S - length of subsequence,
+        W - input tensor length, C - input tensor channels.
+        Args:
+            spline_path (_type_): path to spline files
+            window (int, optional): Odometry model input size in time. Defaults to 100.
+            step (int, optional): Step between two windows in subsequences. Defaults to 10.
+            subseq_len (int, optional): Number of windows in subsequence. Defaults to 1.
+            enable_noise (bool, optional): IMU noise injection. Defaults to False.
+        """
+    def __init__(self, spline_path, window = 100, step = 10, subseq_len = 1, enable_noise = False):
         self.window = window
+        self.step = step
         self.subseq_len = subseq_len
-        self.subsequences = []  # List of (experiment_idx, start_idx)
+        self.enable_noise = enable_noise
+        self.subsequences = []  # List of (experiment_idx, ((slice_1_range),(slice_2_range),...))
 
-        self.bias_acc = np.array([0, 0])
-        self.Q_acc = np.diag([0.9**2, 0.9**2]) if enable_noise else np.zeros((2, 2))
-        self.bias_w = np.array([0])
-        self.Q_w = np.array([[0.15**2]]) if enable_noise else np.zeros((1, 1))
+        if self.enable_noise:
+            self.bias_acc = np.array([0, 0])
+            self.Q_acc = np.diag([0.9**2, 0.9**2]) if enable_noise else np.zeros((2, 2))
+            self.bias_w = np.array([0])
+            self.Q_w = np.array([[0.15**2]]) if enable_noise else np.zeros((1, 1))
 
-        self.all_slices = []     # List of [num_slices, window, 3]
-        self.all_velocities = [] # List of [num_slices, 2]
-        self.all_gt_poses = []   # List of [num_slices, 3]
+        self.all_velocities = []
+        self.all_gt_poses = []
 
-        paths = glob.glob(f'{spline_path}/spline_*.txt')
-        print(f"Found {len(paths)} splines in path: {spline_path}")
+        self.all_acc = []
+        self.all_gyro = []
+        self.all_tau = []
 
-        for exp_id, path in enumerate(tqdm(paths)):
+        self.paths = glob.glob(f'{spline_path}/spline_*.txt')
+        print(f"Found {len(self.paths)} splines in path: {spline_path}")
+
+        # iterating over all files with spline points and computing subsequence indexes
+        for exp_id, path in enumerate(tqdm(self.paths)):
             spline_points = np.genfromtxt(path)
             acc, gyro, velocity, poses, tau = generate_imu_data(spline_points)
 
-            acc = acc[10:-10]
-            gyro = gyro[10:-10]
-            velocity = velocity[10:-10]
-            poses = poses[10:-10]
+            # TODO trimming away heads and tails of spline IMU data becase it can be too big
+            # acc = acc[10:-10]
+            # gyro = gyro[10:-10]
+            # velocity = velocity[10:-10]
+            # poses = poses[10:-10]
 
             tmp_data = np.concatenate((acc, gyro), axis=1)
-            num_slices = tmp_data.shape[0] // window
 
-            if num_slices < subseq_len:
-                continue  # Skip if not enough slices for a full subsequence
+            num_slices = (tmp_data.shape[0] - self.window) // self.step
 
-            slices = []
-            vel_list = []
-            pose_list = []
+            if num_slices < self.subseq_len:
+                continue  # Skip if not enough slices for at least one subsequence
 
-            for i in range(num_slices):
-                imu_slice = tmp_data[i * window:(i + 1) * window]
+            # storing all data as it is for every experiment so later can get values by indexes
+            # T - experiment duration
+            self.all_acc.append(acc) # [T, 2]
+            self.all_gyro.append(gyro) # [T, 1]
+            self.all_velocities.append(velocity)  # [T, 2]
+            self.all_gt_poses.append(poses)   # [T, 3]
+            self.all_tau.append(tau) # [T, 2]
 
-                acc_noise = np.random.multivariate_normal(self.bias_acc, self.Q_acc, self.window)
-                omega_noise = np.random.multivariate_normal(self.bias_w, self.Q_w, self.window)
+            # computing all indexes for subsequences of slices
+            # S - number of sequential slices of length W = self.window
+            for start_idx in range(0, len(tmp_data) - self.step*(self.subseq_len - 1) - self.window, self.step):
+                slices_idxs = []
+                for sub_idx in range(self.subseq_len):
+                    end_idx = start_idx + sub_idx*self.step + self.window
+                    slices_idxs.append((start_idx + self.step*sub_idx, end_idx))
+                self.subsequences.append((exp_id, slices_idxs))
 
-                imu_slice[:, :2] += acc_noise
-                imu_slice[:, 2:] += omega_noise
-
-                slices.append(imu_slice)
-                vel_list.append(velocity[i * window])
-                pose_list.append(poses[i * window])
-
-            self.all_slices.append(np.stack(slices))        # [num_slices, window, 3]
-            self.all_velocities.append(np.stack(vel_list))  # [num_slices, 2]
-            self.all_gt_poses.append(np.stack(pose_list))   # [num_slices, 3]
-
-            for start_idx in range(0, num_slices - subseq_len + 1):
-                self.subsequences.append((exp_id, start_idx))
+        # self.all_acc = np.array(self.all_acc)
+        # self.all_gyro = np.array(self.all_gyro)
+        # self.all_velocities = np.array(self.all_velocities)
+        # self.all_gt_poses = np.array(self.all_gt_poses)
+        # self.all_tau = np.array(self.all_tau)
 
     def __len__(self):
         return len(self.subsequences)
 
     def __getitem__(self, idx):
-        exp_id, start_idx = self.subsequences[idx]
-        slices = self.all_slices[exp_id][start_idx:start_idx + self.subseq_len]       # [M, window, 3]
-        velocities = self.all_velocities[exp_id][start_idx:start_idx + self.subseq_len]  # [M, 2]
-        gt_poses = self.all_gt_poses[exp_id][start_idx:start_idx + self.subseq_len]   # [M, 3]
+        # this function will return evey object with leading dimension S:
+        # imu slices - [S, 3, W]
+        # velocities - [S, 2]
+        # gt_poses - [S, 3]
+        exp_id, subseq_idxs = self.subsequences[idx]
 
-        imu_seq = torch.tensor(slices, dtype=torch.float32).permute(0, 2, 1)          # [M, 3, window]
-        vel_seq = torch.tensor(velocities, dtype=torch.float32)                      # [M, 2]
-        gt_pose_seq = torch.tensor(gt_poses, dtype=torch.float32)                    # [M, 3]
+        slices = [None for _ in range(self.subseq_len)]
+        velocities = [None for _ in range(self.subseq_len)]
+        gt_poses = [None for _ in range(self.subseq_len)]
+
+        for local_idx, sub_idx in enumerate(subseq_idxs):
+            subseq_range = range(sub_idx[0], sub_idx[1])
+            slices[local_idx] = np.hstack((self.all_acc[exp_id][subseq_range],self.all_gyro[exp_id][subseq_range]))
+            velocities[local_idx] = self.all_velocities[exp_id][subseq_range].mean(axis=0)
+            gt_poses[local_idx] = self.all_gt_poses[exp_id][subseq_range][-1]
+
+        slices = np.array(slices)
+        velocities = np.array(velocities)
+        gt_poses = np.array(gt_poses)
+
+        imu_seq = torch.tensor(slices, dtype=torch.float32).permute(0, 2, 1)    # [S, 3, window]
+        vel_seq = torch.tensor(velocities, dtype=torch.float32)                 # [S, 2]
+        gt_pose_seq = torch.tensor(gt_poses, dtype=torch.float32)               # [S, 3]
+
+        assert imu_seq.shape == (self.subseq_len, 3, self.window)
+        assert vel_seq.shape == (self.subseq_len, 2)
+        assert gt_pose_seq.shape == (self.subseq_len, 3)
+
+        # TODO add random noise if enabled
+        if self.enable_noise:
+            acc_noise = np.random.multivariate_normal(self.bias_acc, self.Q_acc, self.window)
+            omega_noise = np.random.multivariate_normal(self.bias_w, self.Q_w, self.window)
+
+            imu_slice[:, :2] += acc_noise
+            imu_slice[:, 2:] += omega_noise
 
         return imu_seq, vel_seq, gt_pose_seq
     
@@ -267,35 +313,10 @@ if __name__ == "__main__":
         number_of_control_nodes = 10
         generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
 
-    if not os.path.isfile(path_to_splines + f'spline_dataset_{number_of_splines}.pkl'):
-        dataset = Spline_2D_Dataset(path_to_splines, window=10, enable_noise = not True)
-        pickle.dump(dataset,open(path_to_splines + f'spline_dataset_{number_of_splines}.pkl','wb'))
-    else:
-        dataset = pickle.load(open(path_to_splines + f'spline_dataset_{number_of_splines}.pkl','rb'))
-    dataset = Spline_2D_Dataset(path_to_splines, window=10, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, window=100,subseq_len=5, enable_noise= not True)
 
     print(f"{dataset.__len__()=}")
     print(f"{dataset.__getitem__(0)=}")
-
-    # for i in range(len(dataset)):
-    #     #sample: dict_keys(['imu', 'y', 'gt_traj', 'gt_poses', 'gt_velocity', 'gt_orientation', 'gt_se3', 'gt_se3vel', 'time])
-
-    #     s = dataset.__getitem__(i)
-
-    #     plt.plot(s['time'],s['imu'][...,0],label='acc_x')
-    #     plt.plot(s['time'],s['imu'][...,1],label='acc_y')
-    #     plt.plot(s['time'],s['imu'][...,2],label='omega_z')
-    #     plt.grid()
-    #     plt.legend()
-
-
-    #     plt.figure()
-    #     plt.plot(s['gt_traj'][...,0],s['gt_traj'][...,1],label='gt traj')
-    #     plt.grid()
-    #     plt.axis('equal')
-    #     plt.legend()
-
-    #     plt.show()
 
     N = len(dataset)
 
