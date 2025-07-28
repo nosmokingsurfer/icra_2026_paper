@@ -144,7 +144,7 @@ def plot_pose_comparison(est_xy, gt_xy, est_yaw, gt_yaw, epoch, rmse_trans, outp
     plt.close('all')
     
 
-def compute_rmse_and_yaw(graph, gt_poses, delta_x, epoch, plot=False, output_dir=None):
+def compute_rmse_and_yaw(graph, gt_poses, delta_x, plot=False, output_dir=None):
     est_poses = graph.get_estimated_state()
     N = len(est_poses)
 
@@ -171,33 +171,26 @@ def compute_rmse_and_yaw(graph, gt_poses, delta_x, epoch, plot=False, output_dir
 
     rmse_rot = np.sqrt(sum_rot_sq / N)
     rmse_trans = np.sqrt(sum_trans_sq / N)
-    
-    if plot:
-        plot_pose_comparison(np.array(est_xy), np.array(gt_xy), np.unwrap(np.array(est_yaw)), np.unwrap(np.array(gt_yaw)), epoch, rmse_trans, output_dir)
 
     return rmse_trans
 
 
 def print_2d_graph(graph, gt_poses):
-    x = graph.get_estimated_state()
+    x = np.array(graph.get_estimated_state())
     
-    prev_p = np.array(graph.get_estimated_state()[0][:2, 3])
-    plt.figure()
+    fig = plt.figure()
 
-    for p in x:
-        p = p[:2, 3]
-        plt.plot(p[0], p[1], 'ob')
-        plt.plot((prev_p[0], p[0]), (prev_p[1], p[1]), '-b', label='estimated')
-        
-        prev_p = p
-    
+    plt.plot(x[:,0,3],x[:,1,3], '-b', marker='o', label='estimated')
     plt.plot(gt_poses[:, :2][:, 0], gt_poses[:, :2][:, 1], label='GT', color='red')
     plt.title("2D Pose Graph")
+
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.legend()
+    plt.axis('equal')
     plt.grid()
-    plt.show()
+    # plt.show()
+    return fig
 
 
 def make_gif_from_figures(folder_path, output_path="graph_evolution.gif", num_epochs=100, duration=0.3):
@@ -221,6 +214,31 @@ def plot_integrated_vel(poses_1, poses_2):
     plt.show()
     return
 
+def process_one_graph(vel_pred, gt_pose_seq, dt):
+    S = vel_pred.shape[0]
+    # Step 1: integrate vel_pred[b] into poses
+    pred_poses = integrate_pred_vel(vel_pred, gt_pose_seq, gt_pose_seq[0], dt=dt)  # [S, 3]
+    
+    # Step 2: build & solve graph
+    graph = populate_graph(pred_poses, gt_pose_seq)  # FGraphDiff
+    graph.build_jacobians()
+    graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+    dL_dz = graph.get_dx_dz() / dt  # [6S, 6S + (S-1)*S]
+
+    # Step 3: compute delta_x
+    gt_poses_se3 = convert_to_se3(gt_pose_seq.cpu().numpy())
+    delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())  # [S, 6]
+    delta_x_flat = delta_x.reshape(-1)  # [6S]
+
+    # Step 4: compute gradient per sample and stack
+    grad = (delta_x_flat @ dL_dz)[:S*6].reshape(-1, 6)
+    grad_final = torch.from_numpy(grad[:, [3, 4]]).float()  # [S, 2]
+
+    # Step 5: computing chi2 and rmse errors
+    chi2 = graph.chi2()
+    rmse = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, plot=False)
+    
+    return grad_final, chi2, rmse
 
 if __name__ == "__main__":
     model = ResNet1D(
@@ -239,7 +257,7 @@ if __name__ == "__main__":
     
     # model.load_state_dict(torch.load("out/model_fgo.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
 
     criterion = nn.MSELoss()
 
@@ -258,68 +276,86 @@ if __name__ == "__main__":
     dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=3, enable_noise= not True)
 
     train_dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True)
+    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+
     dt = window_size / 100
     rmse_errors = []
     chi2_errors = []
+    learning_rates = []
     
-    for epoch in range(10):
-        total_chi2, total_rmse = 0.0, 0.0
-        model.train()
-        
-        for imu_seq, vel_seq, gt_pose_seq in tqdm(train_dataloader):
-            # imu_seq: [B, S, 3, W]
-            # vel_seq: [B, S, 2]
-            B, S, C, W = imu_seq.shape
+    with Pool(8) as p:
 
-            # running model inference for all slices at once
-            vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
+        for epoch in range(200):
+
+            if epoch % 1 == 0:
+                model.eval()
+                imu_seq, vel_seq, gt_pose_seq = val_dataloader.dataset.__getitem__(0)
+                S, C, W = imu_seq.shape
+                vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
+                pred_poses = integrate_pred_vel(vel_pred, gt_pose_seq, gt_pose_seq[0], dt=dt)  # [S, 3]
+                graph = populate_graph(pred_poses, gt_pose_seq)
+                # graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+                fig = print_2d_graph(graph,gt_pose_seq)
+                plt.title(f'Epoch: {epoch}\nLR:{scheduler.get_last_lr()[0]:.2e}')
+                plt.savefig(f'./out/graphs/epoch_{epoch}_idx_0.jpg')
+                plt.close('all')
+
+            total_chi2, total_rmse = 0.0, 0.0
+            model.train()
             
-            optimizer.zero_grad()
+            for imu_seq, vel_seq, gt_pose_seq in tqdm(train_dataloader):
+                # imu_seq: [B, S, 3, W]
+                # vel_seq: [B, S, 2]
+                B, S, C, W = imu_seq.shape
 
-            all_graphs = []
-            all_delta_x = []
-            all_dL_dz = []
-            all_grads = []
-
-            for b in range(B):
-                # Step 1: integrate vel_pred[b] into poses
-                pred_poses = integrate_pred_vel(vel_pred[b], gt_pose_seq[b], gt_pose_seq[b, 0], dt=dt)  # [M, 3]
+                # running model inference for all slices at once
+                vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
                 
-                # Step 2: build & solve graph
-                graph = populate_graph(pred_poses, gt_pose_seq[b])  # FGraphDiff
-                graph.build_jacobians()
-                graph.solve(mrob.FGraphDiff_LM, maxIters=100)
-                dL_dz = graph.get_dx_dz() / dt  # [6M, 6M]
+                optimizer.zero_grad()
 
-                # Step 3: compute delta_x
-                gt_poses_se3 = convert_to_se3(gt_pose_seq[b].detach().cpu().numpy())
-                delta_x = compute_delta_x(gt_poses_se3, graph.get_estimated_state())  # [M, 6]
-                delta_x_flat = delta_x.reshape(-1)  # [6M]
+                all_grads = [None for _ in range(B)]
 
-                all_dL_dz.append(dL_dz)
-                all_delta_x.append(delta_x_flat)
+                res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach(), gt_pose_seq[b].detach(), dt)) for b in range(B)]
 
-                chi2 = graph.chi2()
-                rmse = compute_rmse_and_yaw(graph, gt_poses_se3, delta_x, epoch, plot=False)
-                total_chi2 += chi2
-                total_rmse += rmse
+                total_chi2 = 0
+                total_rmse = 0
 
-                # Step 4: compute gradient per sample and stack
-                grad = (all_delta_x[b] @ all_dL_dz[b])[0:(S * 6)].reshape(-1, 6)
-                grad_final = torch.from_numpy(grad[:, [3, 4]]).float().to(vel_pred.device)  # [S, 2]
-                all_grads.append(grad_final)
+                for i, r in enumerate(res):
+                    all_grads[i], chi2, rmse = r.get()
+                    total_chi2 += chi2
+                    total_rmse += rmse
 
-            grad_tensor = torch.stack(all_grads)  # [B, S, 2]
-            vel_pred.backward(gradient=-grad_tensor)
+                grad_tensor = torch.stack(all_grads)  # [B, S, 2]
+                vel_pred.backward(gradient=-grad_tensor)
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-            optimizer.step()
-        
-        chi2_errors.append(total_chi2 / len(train_dataloader))
-        rmse_errors.append(total_rmse / len(train_dataloader))
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                optimizer.step()
+                scheduler.step()
+            
+            chi2_errors.append(total_chi2 / len(train_dataloader))
+            rmse_errors.append(total_rmse / len(train_dataloader))
+            learning_rates.append(scheduler.get_last_lr()[0])
 
-        print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
+            print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
+            print(f"Learning Rate : {scheduler.get_last_lr()}")
 
-    plt.plot(chi2_errors)
-    plt.plot(rmse_errors)
+
+
+
+    plt.plot(chi2_errors,label='chi2')
+    plt.plot(rmse_errors,label='rmse')
+    plt.xlabel('epoch')
+    plt.grid()
+    plt.legend()
+
+    plt.figure()
+    plt.plot(learning_rates,label='learning rate')
+    plt.grid()
+    plt.xlabel('epoch')
+    plt.legend()
+
     plt.show()
+
+    
