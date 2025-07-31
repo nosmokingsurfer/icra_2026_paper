@@ -2,13 +2,14 @@ import mrob
 import numpy as np
 np.set_printoptions(precision=4,linewidth=180)
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
 from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
-import matplotlib.pyplot as plt
-import imageio.v2 as imageio
+# import imageio.v2 as imageio
 import os
 import sys
 from pathlib import Path
@@ -16,10 +17,6 @@ sys.path.insert(0,str(Path('../ronin/source/').resolve()))
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from torch.multiprocessing import Pool
-
-from mrob_num_diff.graph_generator import ToRoContainer, compare_gradients
-from mrob_num_diff.num_diff import find_factor_coord_idx, visualize_gradient
-from mrob_num_diff.num_diff_3d import numerical_diff2_3d, numerical_diff2_3d_sparse, numerical_diff1_3d
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
@@ -240,7 +237,11 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     
     return grad_final, chi2, rmse
 
-if __name__ == "__main__":
+def run_experiment(subseq_len = 3, n_epochs=300):
+    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}/"
+    if not os.path.exists(output_path):
+        os.makedirs(output_path, exist_ok=True)
+
     model = ResNet1D(
         num_inputs=3,       
         num_outputs=2,         
@@ -261,9 +262,6 @@ if __name__ == "__main__":
 
     criterion = nn.MSELoss()
 
-    output_path = './out/'
-    if not os.path.exists(output_path):
-        os.makedirs(output_path,exist_ok=True)
     path_to_splines = output_path + 'splines'
 
     number_of_splines = 20
@@ -275,7 +273,7 @@ if __name__ == "__main__":
     
     dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=3, enable_noise= not True)
 
-    train_dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True)
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
@@ -285,77 +283,97 @@ if __name__ == "__main__":
     chi2_errors = []
     learning_rates = []
     
-    with Pool(8) as p:
 
-        for epoch in range(200):
+    for epoch in range(n_epochs):
 
-            if epoch % 1 == 0:
-                model.eval()
-                imu_seq, vel_seq, gt_pose_seq = val_dataloader.dataset.__getitem__(0)
-                S, C, W = imu_seq.shape
-                vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
-                pred_poses = integrate_pred_vel(vel_pred, gt_pose_seq, gt_pose_seq[0], dt=dt)  # [S, 3]
-                graph = populate_graph(pred_poses, gt_pose_seq)
-                # graph.solve(mrob.FGraphDiff_LM, maxIters=100)
-                fig = print_2d_graph(graph,gt_pose_seq)
-                plt.title(f'Epoch: {epoch}\nLR:{scheduler.get_last_lr()[0]:.2e}')
-                plt.savefig(f'./out/graphs/epoch_{epoch}_idx_0.jpg')
-                plt.close('all')
-
-            total_chi2, total_rmse = 0.0, 0.0
-            model.train()
+        # running validation every epoch
+        if epoch % 1 == 0:
+            model.eval()
+            imu_seq, vel_seq, gt_pose_seq = val_dataloader.dataset.__getitem__(0)
+            S, C, W = imu_seq.shape
+            vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
+            pred_poses = integrate_pred_vel(vel_pred, gt_pose_seq, gt_pose_seq[0], dt=dt)  # [S, 3]
+            graph = populate_graph(pred_poses, gt_pose_seq)
+            # graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+            # print_2d_graph(graph,gt_pose_seq)
+            x = np.array(graph.get_estimated_state())
             
-            for imu_seq, vel_seq, gt_pose_seq in tqdm(train_dataloader):
-                # imu_seq: [B, S, 3, W]
-                # vel_seq: [B, S, 2]
-                B, S, C, W = imu_seq.shape
+            plt.figure()
 
-                # running model inference for all slices at once
-                vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
-                
-                optimizer.zero_grad()
+            plt.plot(x[:,0,3],x[:,1,3], '-b', marker='o', label='estimated')
+            plt.plot(gt_pose_seq[:, :2][:, 0], gt_pose_seq[:, :2][:, 1], label='GT', color='red')
+            plt.title("2D Pose Graph")
 
-                all_grads = [None for _ in range(B)]
+            plt.xlabel("X")
+            plt.ylabel("Y")
+            plt.legend()
+            plt.axis('equal')
+            plt.grid()
+            plt.title(f'Epoch: {epoch}\nLR:{scheduler.get_last_lr()[0]:.2e}')
+            plt.savefig(f'{output_path}epoch_{epoch}_idx_0.jpg')
+            plt.close('all')
 
+        total_chi2, total_rmse = 0.0, 0.0
+        model.train()
+        
+        for imu_seq, vel_seq, gt_pose_seq in tqdm(train_dataloader, position=0, leave=True):
+            # imu_seq: [B, S, 3, W]
+            # vel_seq: [B, S, 2]
+            B, S, C, W = imu_seq.shape
+
+            # running model inference for all slices at once
+            vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
+            
+            optimizer.zero_grad()
+
+            all_grads = [None for _ in range(B)]
+
+            total_chi2 = 0
+            total_rmse = 0
+
+
+            with Pool(8) as p:
                 res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach(), gt_pose_seq[b].detach(), dt)) for b in range(B)]
 
-                total_chi2 = 0
-                total_rmse = 0
 
                 for i, r in enumerate(res):
                     all_grads[i], chi2, rmse = r.get()
                     total_chi2 += chi2
                     total_rmse += rmse
 
-                grad_tensor = torch.stack(all_grads)  # [B, S, 2]
-                vel_pred.backward(gradient=-grad_tensor)
+            grad_tensor = torch.stack(all_grads)  # [B, S, 2]
+            vel_pred.backward(gradient=-grad_tensor)
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
-                optimizer.step()
-                scheduler.step()
-            
-            chi2_errors.append(total_chi2 / len(train_dataloader))
-            rmse_errors.append(total_rmse / len(train_dataloader))
-            learning_rates.append(scheduler.get_last_lr()[0])
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+            optimizer.step()
+            scheduler.step()
+        
+        chi2_errors.append(total_chi2 / len(train_dataloader))
+        rmse_errors.append(total_rmse / len(train_dataloader))
+        learning_rates.append(scheduler.get_last_lr()[0])
 
-            print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
-            print(f"Learning Rate : {scheduler.get_last_lr()}")
+        print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
+        print(f"Learning Rate : {scheduler.get_last_lr()}")
 
-
-
-
+    plt.title('Errors: CHi2 and RMSE')
     plt.plot(chi2_errors,label='chi2')
     plt.plot(rmse_errors,label='rmse')
     plt.xlabel('epoch')
     plt.grid()
     plt.legend()
+    plt.savefig(f'{output_path}/errors.png')
+    plt.close('all')
 
     plt.figure()
     plt.plot(learning_rates,label='learning rate')
     plt.grid()
     plt.xlabel('epoch')
     plt.legend()
+    plt.savefig(f'{output_path}/learning_rate.png')
+    plt.close('all')
 
-    plt.show()
 
-    
+if __name__ == "__main__":
+
+    for s in range(3,27,4):
+        run_experiment(s,100)
