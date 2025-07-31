@@ -262,7 +262,7 @@ def run_experiment(subseq_len = 3, n_epochs=300):
 
     criterion = nn.MSELoss()
 
-    path_to_splines = output_path + 'splines'
+    path_to_splines =  './out/splines'
 
     number_of_splines = 20
     if not os.path.exists(path_to_splines):
@@ -271,7 +271,7 @@ def run_experiment(subseq_len = 3, n_epochs=300):
         
     window_size = 100
     
-    dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=3, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=subseq_len, enable_noise= not True)
 
     train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
@@ -375,5 +375,5 @@ def run_experiment(subseq_len = 3, n_epochs=300):
 
 if __name__ == "__main__":
 
-    for s in range(3,27,4):
+    for s in range(1,27,4):
         run_experiment(s,100)
