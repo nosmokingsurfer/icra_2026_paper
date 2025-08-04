@@ -73,115 +73,6 @@ def get_gt_se3vel_Poses(poses, velocities):
     return result
 
 
-class Spline_2D_Dataset_old():
-    def __init__(self, spline_path, window = 100, enable_noise = True):
-
-        self.window = window
-
-        self.bias_acc = np.array([0,0])
-        if enable_noise:
-            self.Q_acc = np.array([0.9**2,0,0,0.9**2]).reshape(2,2)
-        else:
-            self.Q_acc = np.zeros((2,2))
-
-        self.bias_w = np.array([0])
-        if enable_noise:
-            self.Q_w = np.array([0.15**2]).reshape(1,1)
-        else:
-            self.Q_w = np.zeros((1,1))
-
-        paths = glob.glob(f'{spline_path}/spline_*.txt')
-        print(f"Found {len(paths)} splines in path: {spline_path}")
-
-        B = len(paths) # this is our batch size
-
-        self.data = np.zeros((B,window,3))#np.concatenate((acc,gyro),axis=1)
-
-        self.slices = [[] for _ in range(B)]
-        self.gt_odometry = [[] for _ in range(B)]
-        self.gt_traj = [[] for _ in range(B)]
-        self.gt_poses = [[] for _ in range(B)]
-        self.gt_velocity = [[] for _ in range(B)]
-        self.w_z = [[] for _ in range(B)]
-
-        for b in tqdm(range(len(paths))):
-            # 1 sample == 1 spline
-
-            spline_points = np.genfromtxt(paths[b])
-
-            self.gt_traj[b] = spline_points
-
-            acc, gyro, velocity, poses, tau = generate_imu_data(spline_points)
-            number_elements_to_cut = 10
-            self.gt_traj[b] = self.gt_traj[b][number_elements_to_cut:-number_elements_to_cut]
-            acc = acc[number_elements_to_cut:-number_elements_to_cut]
-            gyro = gyro[number_elements_to_cut:-number_elements_to_cut]
-            tau = tau[number_elements_to_cut:-number_elements_to_cut]
-            velocity = velocity[number_elements_to_cut:-number_elements_to_cut]
-            poses = poses[number_elements_to_cut:-number_elements_to_cut]
-            #TODO cut begining and end of splines
-            # TODO inject noise:
-            # -additive
-            # -multiplicative
-
-            tmp_data = np.concatenate((acc,gyro),axis=1)
-            
-            # splitting 1 track into several slices
-            slice_num = tmp_data.shape[0] // self.window
-            for i in range(slice_num):
-
-                temp_slice = tmp_data[i*self.window : (i+1)*self.window]
-
-                acc_noise = np.random.multivariate_normal(self.bias_acc,self.Q_acc,self.window)
-                temp_slice[:,:2] = temp_slice[:,:2] + acc_noise
-
-                omega_noise = np.random.multivariate_normal(self.bias_w, self.Q_w,self.window)
-                temp_slice[:,2:] = temp_slice[:,2:] + omega_noise
-
-                self.slices[b].append(temp_slice) # adding i-th slice into b-th track
-
-            # self.gt_poses[b] = np.concatenate((self.gt_traj[b][:tau.shape[0]], tau), axis=1)[::window]
-            self.gt_poses[b] = poses[::window]
-            self.gt_velocity[b] = velocity[::window]
-            self.w_z[b] = gyro[::window]
-
-        self.X = np.array(self.slices)
-        #self.gt_traj = np.array(self.gt_traj)
-        self.gt_poses = np.array(self.gt_poses)
-        self.gt_velocity = np.array(self.gt_velocity)
-        self.w_z = np.array(self.w_z)
-        
-        self.adjust_shape()
-        
-        self.gt_poses_se3 = convert_to_se3(self.gt_poses)
-            
-    def adjust_shape(self):
-        min_length = min(self.X.shape[1], self.gt_velocity.shape[1])
-        self.X = self.X[:, :min_length, :, :]
-        self.X = self.X.reshape(-1, self.X.shape[2], self.X.shape[3])
-        self.w_z = self.X[:, :, 2]
-        
-        self.gt_poses = self.gt_poses[:, :min_length, :]
-        self.gt_poses = self.gt_poses.reshape(-1, self.gt_poses.shape[-1])
-        
-        self.gt_velocity = self.gt_velocity[:, :min_length, :]
-        self.gt_velocity = self.gt_velocity.reshape(-1, self.gt_velocity.shape[-1])
-        
-        self.w_z = self.w_z[:min_length, :]
-        self.w_z = self.w_z.reshape(-1)
-
-    def __len__(self):
-        return self.X.shape[0]
-
-    def __getitem__(self,idx):
-        imu = torch.tensor(self.X[idx], dtype=torch.float32).permute(1, 0)
-        velocity = torch.tensor(self.gt_velocity[idx], dtype=torch.float32)
-        poses = torch.tensor(self.gt_poses[idx], dtype=torch.float32)
-        poses_se3 = torch.tensor(self.gt_poses_se3[idx], dtype=torch.float32)
-        w_z = torch.tensor(self.w_z[idx], dtype=torch.float32)
-        return imu, velocity, poses, w_z
-
-
 class Spline_2D_Dataset(Dataset):
     """
         Reads synthetic generated spline data and prepares subsequences of overlapping 
@@ -194,9 +85,10 @@ class Spline_2D_Dataset(Dataset):
             subseq_len (int, optional): Number of windows in subsequence. Defaults to 1.
             enable_noise (bool, optional): IMU noise injection. Defaults to False.
         """
-    def __init__(self, spline_path, window = 100, step = 10, subseq_len = 1, enable_noise = False):
+    def __init__(self, spline_path, window = 100, step = 10, sampling_rate=100, subseq_len = 1, enable_noise = False):
         self.window = window
         self.step = step
+        self.sampling_rate = sampling_rate
         self.subseq_len = subseq_len
         self.enable_noise = enable_noise
         self.subsequences = []  # List of (experiment_idx, ((slice_1_range),(slice_2_range),...))
@@ -252,11 +144,6 @@ class Spline_2D_Dataset(Dataset):
                     slices_idxs.append((start_idx + self.step*sub_idx, end_idx))
                 self.subsequences.append((exp_id, slices_idxs))
 
-        # self.all_acc = np.array(self.all_acc)
-        # self.all_gyro = np.array(self.all_gyro)
-        # self.all_velocities = np.array(self.all_velocities)
-        # self.all_gt_poses = np.array(self.all_gt_poses)
-        # self.all_tau = np.array(self.all_tau)
 
     def __len__(self):
         return len(self.subsequences)
@@ -298,8 +185,22 @@ class Spline_2D_Dataset(Dataset):
             imu_slice[:, :2] += acc_noise
             imu_slice[:, 2:] += omega_noise
 
-        return imu_seq, vel_seq, gt_pose_seq
+        sample = {
+            'imu_seq' : imu_seq,
+            'gt_vel_seq' : vel_seq,
+            'gt_poses_seq' : gt_pose_seq,
+            'gt_poses_se3' : np.array([mrob.SE3([g[2],0,0,g[0],g[1],0]) for g in gt_pose_seq]),
+        }
+        return sample
     
+    def get_collate_fn(self):
+        def regular_collate(batch):
+            imu = torch.stack([item['imu_seq'] for item in batch])
+            gt_vel = torch.stack([item['gt_vel_seq'] for item in batch])
+            gt_poses = torch.stack([item['gt_poses_seq'] for item in batch])
+            return {'imu': imu, 'gt_vel': gt_vel, 'gt_poses': gt_poses}
+        return regular_collate
+
 
 if __name__ == "__main__":
     output_path = './out/'
