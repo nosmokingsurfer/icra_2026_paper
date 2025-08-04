@@ -222,5 +222,4 @@ if __name__ == "__main__":
     N = len(dataset)
 
     for i in range(N):
-        print(dataset.__getitem__(i)[0].shape)
-        print(dataset.__getitem__(i)[1].shape)
+        print(dataset.__getitem__(i))

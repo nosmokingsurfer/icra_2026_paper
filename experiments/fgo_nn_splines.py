@@ -12,7 +12,7 @@ import sys
 import pickle
 from tqdm import tqdm
 from pathlib import Path
-sys.path.insert(0,str(Path('./external/ronin/source/').resolve()))
+
 
 import torch
 import torch.nn as nn
@@ -22,35 +22,12 @@ from torch.multiprocessing import Pool
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
+from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
+
 from metric import compute_ate_rte
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
-
-def plot_losses(chi2_losses, rmse_losses, labels=("Chi²", "RMSE"), title="Losses", output_path=None):
-    epochs = list(range(len(chi2_losses)))
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
-
-    ax1.plot(epochs, chi2_losses, color='blue', marker='o', label=labels[0])
-    ax1.set_ylabel(labels[0], fontsize=14)
-    ax1.set_title(title, fontsize=16)
-    ax1.grid(True)
-    ax1.legend(fontsize=12)
-
-    ax2.plot(epochs, rmse_losses, color='red', marker='x', label=labels[1])
-    ax2.set_xlabel("Epoch", fontsize=14)
-    ax2.set_ylabel(labels[1], fontsize=14)
-    ax2.grid(True)
-    ax2.legend(fontsize=12)
-
-    plt.tight_layout()
-    if output_path:
-        plt.savefig(output_path)
-    else:
-        plt.show()
-    plt.close('all')
-
 
 def compute_delta_x(gt_poses, estimated_poses):
     gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
@@ -111,68 +88,6 @@ def populate_graph(pred_poses, gt_poses):
         graph.add_factor_1pose_3d_diff(T_gps, node_ids[i], W_gps.numpy())
     
     return graph
-
-
-def plot_pose_comparison(est_xy, gt_xy, est_yaw, gt_yaw, epoch, rmse_trans, output_dir=None):
-    N = len(est_xy)
-    plt.figure(figsize=(10, 8))
-    plt.plot(est_xy[:, 0], est_xy[:, 1], '-o', color= 'blue', label='Estimated')
-    plt.plot(gt_xy[:, 0],  gt_xy[:, 1],  '-x', color='red', label='Ground Truth')
-
-    arrow_scale = 1.0
-    head_width = 0.2
-    head_length = 0.4
-    for i in range(0, N, max(1, N // 10)):
-        ex, ey, eyaw = est_xy[i][0], est_xy[i][1], est_yaw[i]
-        gx, gy, gyaw = gt_xy[i][0], gt_xy[i][1], gt_yaw[i]
-        plt.arrow(ex, ey, arrow_scale * np.cos(eyaw), arrow_scale * np.sin(eyaw),
-                  head_width=head_width, head_length=head_length, color='blue', alpha=0.6)
-        plt.arrow(gx, gy, arrow_scale * np.cos(gyaw), arrow_scale * np.sin(gyaw),
-                  head_width=head_width, head_length=head_length, color='red', alpha=0.6)
-
-    plt.title(f"Epoch {epoch}: Estimated vs Ground Truth Poses. RMSE = {rmse_trans:.3f}")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.grid(True)
-    plt.axis("equal")
-    plt.legend()
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(f'{output_dir}/poses_{epoch}')
-    else:
-        plt.show()    
-    plt.close('all')
-    
-
-def compute_rmse_and_yaw(graph, gt_poses, delta_x, plot=False, output_dir=None):
-    est_poses = graph.get_estimated_state()
-    N = len(est_poses)
-
-    sum_trans_sq = 0.0
-    sum_rot_sq = 0.0
-    est_xy, gt_xy = [], []
-    est_yaw, gt_yaw = [], []
-
-    for i in range(N):
-        xi = delta_x[i]
-        rot_vec, trans_vec = xi[:3], xi[3:]
-
-        sum_rot_sq += np.sum(rot_vec**2)
-        sum_trans_sq += np.sum(trans_vec**2)
-
-        est_pose = est_poses[i]
-        gt_pose = gt_poses[i]
-
-        est_xy.append(est_pose[:2, 3])
-        gt_xy.append(gt_pose[:2, 3])
-
-        est_yaw.append(np.arctan2(est_pose[1, 0], est_pose[0, 0]))
-        gt_yaw.append(np.arctan2(gt_pose[1, 0], gt_pose[0, 0]))
-
-    rmse_rot = np.sqrt(sum_rot_sq / N)
-    rmse_trans = np.sqrt(sum_trans_sq / N)
-
-    return rmse_trans
 
 
 def print_2d_graph(graph, gt_poses):
@@ -442,5 +357,8 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
 if __name__ == "__main__":
 
-    for s in range(1,5,1):
-        run_spline_experiment(s, 50)
+    # for s in range(1,5,1):
+    #     run_spline_experiment(s, 50)
+
+    run_spline_experiment(1, 100)
+    run_spline_experiment(6, 100)
