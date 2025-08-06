@@ -19,12 +19,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from torch.multiprocessing import Pool
-from spline_dataset.spline_generation import generate_batch_of_splines
-from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
+from ronin_dataset.ronin_dataset import RoninDataset
 from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
+from spline_dataset.spline_dataloader import convert_to_se3
 
-from metric import compute_ate_rte
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
@@ -186,7 +185,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
 
         est_traj = est_pose_seq[:,:2,3]
         gt_traj = gt_poses_seq[:,:2].detach().cpu().numpy()
-        ate, rte = compute_ate_rte(est_traj,gt_traj,60/dt)
+        ate, rte = compute_ate_rte(est_traj,gt_traj,int(60/dt))
 
         result['ate'] = ate
         result['rte'] = rte
@@ -210,9 +209,9 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         pickle.dump(result, open(f'{output_path}idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 
-def run_spline_experiment(subseq_len = 3, n_epochs=300):
+def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     '''
-    Odometry model training pipeline on spline dataset
+    Odometry model training pipeline on RONIN dataset
     if subseq_len == 1 - conventional window-based training mode
     if subseq_len > 1 - FGO loss training mode
     '''
@@ -222,23 +221,15 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     results['n_actual_epochs'] = 0
     results['subseq_len'] = subseq_len
 
-    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}/"
+    output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/"
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
 
-    model = ResNet1D(
-        num_inputs=3,       
-        num_outputs=2,         
-        block_type=BasicBlock1D,
-        group_sizes=[2, 2, 2],   
-        base_plane=64,
-        output_block=FCOutputModule,  
-        kernel_size=3,
-        fc_dim=512,             
-        in_dim=7,            
-        dropout=0.5,
-        trans_planes=128
-    )
+    _input_channel, _output_channel = 6, 2
+    _fc_config = {'fc_dim': 512, 'in_dim': 7, 'dropout': 0.5, 'trans_planes': 128}
+
+    model = ResNet1D(_input_channel, _output_channel, BasicBlock1D, [2, 2, 2, 2],
+                           base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
     
     # model.load_state_dict(torch.load("out/model_fgo.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -246,24 +237,23 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
     criterion = nn.MSELoss()
 
-    path_to_splines =  './out/splines'
-
-    number_of_splines = 20
-    if not os.path.exists(path_to_splines):
-        number_of_control_nodes = 10
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
-        
-    window_size=100
-    step_size=10
-    sampling_rate =100
     
-    dataset = Spline_2D_Dataset(path_to_splines, window=window_size,sampling_rate=100, subseq_len=subseq_len, enable_noise= not True)
-    train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True, collate_fn=dataset.get_collate_fn())
 
-    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True)
+    
+    # window_size=200
+    # step_size=20
+
+
+    
+    train_dataset = RoninDataset(step=20, window=200,subseq_len=subseq_len)
+    train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=train_dataset.get_collate_fn())
+    print(len(train_dataset))
+
+    val_dataset = RoninDataset(step=20, window=200, subseq_len=2000)
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    print(len(val_dataset))
     
-    dt = step_size/sampling_rate
+    dt = train_dataset.step/train_dataset.sampling_rate
     rmse_errors = []
     chi2_errors = []
     learning_rates = []
@@ -363,6 +353,6 @@ if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-
-    run_spline_experiment(1, 100)
-    run_spline_experiment(6, 100)
+    run_ronin_experiment(1, 100)
+    run_ronin_experiment(5, 100)
+    # run_spline_experiment(6, 100)
