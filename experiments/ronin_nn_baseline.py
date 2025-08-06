@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime
+import json 
 
 from torch.utils.tensorboard import SummaryWriter
 sys.path.insert(0,str(Path('./external/ronin/source/').resolve()))
@@ -61,7 +62,7 @@ def train_ronin(args, fc_config):
     output_root_path = Path(args.out_dir)
     current_time = datetime.datetime.now()
     
-    output_dir_name = f"{current_time.day}_{current_time.month}_{current_time.hour}_{current_time.minute}"
+    output_dir_name = f"current_date_{current_time.day}_{current_time.month}_current_time_{current_time.hour}_{current_time.minute}"
 
     output_dir = output_root_path / output_dir_name
 
@@ -76,24 +77,30 @@ def train_ronin(args, fc_config):
 
     writer = SummaryWriter(output_dir)
 
+    with open(meta_save_dir / 'config.json', 'w') as f:
+            json.dump(vars(args), f)
+
     device = torch.device('cuda:0' if torch.cuda.is_available() and not args.cpu else 'cpu')
     if device.type == 'cpu':
-        print("_"*50, "\n", "USING CPU FOR TRAININ", "_"*50, "\n")
+        print("_"*50, "\n", "USING CPU FOR TRAININ\n", "_"*50, "\n")
 
     train_loader, test_loader = build_datasets(args)
-    if args.model_path is not None:
-        checkpoints = torch.load(args.model_path)
-        network.load_state_dict(checkpoints.get('model_state_dict'))
-        optimizer.load_state_dict(checkpoints.get('optimizer_state_dict'))
-    else:
-        network = get_model(args.arch, fc_config).to(device)
-    total_params = network.get_num_params()
-    print('Total number of network\'s parameters: ', total_params)
+    network = get_model(args.arch, fc_config).to(device)
 
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(network.parameters(), args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=10, eps=1e-12)
-    # TODO: probably in the future we should move this scheduler parameters to config as well
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=10, eps=1e-12) # TODO: probably in the future we should move this scheduler parameters to config as well
+
+    if args.model_path is not None:
+        print("_"*50, "\n", "Loading model from the checkpoint:  ", args.model_path, "\n", "_"*50, "\n")
+        checkpoints = torch.load(args.model_path, weights_only=False)
+        network.load_state_dict(checkpoints.get('model_state_dict'))
+        optimizer.load_state_dict(checkpoints.get('optimizer_state_dict'))
+
+
+    total_params = network.get_num_params()
+    print('Total number of network\'s parameters: ', total_params)
+    
 
     train_iteration_tracker, test_iteration_tracker = 1, 1
     best_ate, best_rte = np.inf, np.inf
@@ -118,7 +125,7 @@ def train_ronin(args, fc_config):
                 
             
             if test_iteration_tracker % args.test_step == 0:
-                test_outs, test_targets = run_test(network, test_loader, device, etest_mode=True)
+                test_outs, test_targets = run_test(network, test_loader, device, eval_mode=True)
                 test_losses = np.average((test_outs - test_targets) ** 2, axis=0)
                 avg_loss = np.average(test_losses)
                 scheduler.step(avg_loss)
@@ -174,7 +181,7 @@ def train_ronin(args, fc_config):
                         plt.title('{}, error: {:.6f}'.format(targ_names[i], losses[i]))
                     plt.tight_layout()
 
-                    np.save(trajectories_save_dir / data + '_gsn.npy', np.concatenate([pos_pred[:, :2], pos_gt[:, :2]], axis=1))
+                    np.save(trajectories_save_dir / f"{data}_gsn.npy", np.concatenate([pos_pred[:, :2], pos_gt[:, :2]], axis=1))
                     writer.add_figure(data + '.png', plt.gcf(), global_step=test_iteration_tracker)
                     plt.close('all')
                     
@@ -196,16 +203,17 @@ def train_ronin(args, fc_config):
 
                     if np.mean(ate_all) < best_ate:
                         best_ate = np.mean(ate_all)
-                        model_path = test_checkpoints / f"best_ate_%.4f.pt" % best_ate
+                        model_path = test_checkpoints / "best_ate.pt"
                         torch.save({'model_state_dict': network.state_dict(),
                         'epoch': epoch,
-                        'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                        'optimizer_state_dict': optimizer.state_dict(), "metric": best_ate}, model_path)
+
                     if np.mean(rte_all) < best_rte:
                         best_rte = np.mean(rte_all)
-                        model_path = test_checkpoints / f"best_rte_%.4f.pt" % best_rte
+                        model_path = test_checkpoints / "best_rte.pt"
                         torch.save({'model_state_dict': network.state_dict(),
                         'epoch': epoch,
-                        'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                        'optimizer_state_dict': optimizer.state_dict(), "metric": best_rte}, model_path)
 
 
 

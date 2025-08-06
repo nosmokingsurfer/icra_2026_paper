@@ -1,0 +1,28 @@
+train_list: "/mnt/d/Projects/ronin/lists/list_train.txt"
+test_list:  "/mnt/d/Projects/ronin/lists/list_test_seen.txt"
+root_dir: "/mnt/d/Projects/ronin/data/Data/train_set"
+out_dir: "/mnt/d/Projects/icra_2026_paper/output"
+mode: train
+arch: resnet18
+model_path: "/mnt/d/Projects/icra_2026_paper/output/current_date_6_8_current_time_17_25/test_checkpoints/best_ate.pt"
+
+test_step: 1
+
+feature_sigma: 1.0e-05
+target_sigma: 1.0e-05
+max_ori_error: 20
+step_size: 10
+window_size: 200
+lr: 0.0001
+train_batch_size: 128
+test_batch_size: 256
+epochs: 10000
+
+cpu: false
+run_ekf: false
+fast_test: false
+show_plot: false
+
+# legacy args. will not be used by us, but still used in original ronin
+dataset: "ronin"
+cache_path: None
