@@ -85,11 +85,16 @@ class Spline_2D_Dataset(Dataset):
             subseq_len (int, optional): Number of windows in subsequence. Defaults to 1.
             enable_noise (bool, optional): IMU noise injection. Defaults to False.
         """
-    def __init__(self, spline_path, window = 100, step = 10, sampling_rate=100, subseq_len = 1, enable_noise = False):
+    def __init__(self, spline_path, window = 100, step = 10, stride=10, sampling_rate=100, subseq_len = 1, enable_noise = False):
+        self.spline_path = spline_path
         self.window = window
+        self.input_dim = 3
+        self.pose_dim = 3
         self.step = step
         self.sampling_rate = sampling_rate
         self.subseq_len = subseq_len
+        # TODO add self.stride parameter - offset between two sequential subsequences. now this value is equal to step which is actualy independent from stride
+        self.stride = stride
         self.enable_noise = enable_noise
         self.subsequences = []  # List of (experiment_idx, ((slice_1_range),(slice_2_range),...))
 
@@ -110,7 +115,7 @@ class Spline_2D_Dataset(Dataset):
         print(f"Found {len(self.paths)} splines in path: {spline_path}")
 
         # iterating over all files with spline points and computing subsequence indexes
-        for exp_id, path in enumerate(tqdm(self.paths)):
+        for exp_id, path in enumerate(self.paths):
             spline_points = np.genfromtxt(path)
             acc, gyro, velocity, poses, tau = generate_imu_data(spline_points)
 
@@ -133,11 +138,12 @@ class Spline_2D_Dataset(Dataset):
             self.all_gyro.append(gyro) # [T, 1]
             self.all_velocities.append(velocity)  # [T, 2]
             self.all_gt_poses.append(poses)   # [T, 3]
-            self.all_tau.append(tau) # [T, 2]
+            # self.all_tau.append(tau) # [T, 2]
 
             # computing all indexes for subsequences of slices
             # S - number of sequential slices of length W = self.window
-            for start_idx in range(0, len(tmp_data) - self.step*(self.subseq_len - 1) - self.window, self.step):
+            # TODO add self stride here instead of step
+            for start_idx in range(0, len(tmp_data) - self.step*(self.subseq_len - 1) - self.window, self.stride):
                 slices_idxs = []
                 for sub_idx in range(self.subseq_len):
                     end_idx = start_idx + sub_idx*self.step + self.window
@@ -173,9 +179,11 @@ class Spline_2D_Dataset(Dataset):
         vel_seq = torch.tensor(velocities, dtype=torch.float32)                 # [S, 2]
         gt_pose_seq = torch.tensor(gt_poses, dtype=torch.float32)               # [S, 3]
 
-        assert imu_seq.shape == (self.subseq_len, 3, self.window)
+        assert imu_seq.shape == (self.subseq_len, self.input_dim, self.window)
         assert vel_seq.shape == (self.subseq_len, 2)
-        assert gt_pose_seq.shape == (self.subseq_len, 3)
+        assert gt_pose_seq.shape == (self.subseq_len, self.pose_dim)
+
+        # TODO enable augmentation - rotate IMU and GT by the same random angle around z axis
 
         # TODO add random noise if enabled
         if self.enable_noise:
@@ -189,7 +197,7 @@ class Spline_2D_Dataset(Dataset):
             'imu_seq' : imu_seq,
             'gt_vel_seq' : vel_seq,
             'gt_poses_seq' : gt_pose_seq,
-            'gt_poses_se3' : np.array([mrob.SE3([g[2],0,0,g[0],g[1],0]) for g in gt_pose_seq]),
+            # 'gt_poses_se3' : np.array([mrob.SE3([g[2],0,0,g[0],g[1],0]) for g in gt_pose_seq]),
         }
         return sample
     
