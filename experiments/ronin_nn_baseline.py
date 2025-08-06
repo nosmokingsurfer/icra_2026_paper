@@ -1,11 +1,10 @@
 import sys
 from pathlib import Path
-from os import path as osp
-# TODO: remove os.path usage, since we are already using pathlib
 from torch.utils.data import DataLoader
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import datetime
 
 from torch.utils.tensorboard import SummaryWriter
 sys.path.insert(0,str(Path('./external/ronin/source/').resolve()))
@@ -16,16 +15,15 @@ from metric import compute_ate_rte
 
 def build_datasets(args):
     train_dataset = get_dataset_from_list(args.root_dir, args.train_list, args, mode='train')
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_dataset, val_loader = None, None
-    if args.val_list is not None:
-        val_dataset = get_dataset_from_list(args.root_dir, args.val_list, args, mode='val')
-        val_loader = DataLoader(val_dataset, batch_size=512, shuffle=True)
-    print('Number of train samples: {}'.format(len(train_dataset)))
-    if val_dataset:
-        print('Number of val samples: {}'.format(len(val_dataset)))
+    train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
 
-    return train_dataset, train_loader, val_dataset, val_loader
+    test_dataset = get_dataset_from_list(args.root_dir, args.test_list, args, mode='test')
+    test_loader = DataLoader(test_dataset, batch_size=args.test_batch_size, shuffle=False)
+    
+    print('Number of train samples: {}'.format(len(train_dataset)))
+    print('Number of test samples: {}'.format(len(test_dataset)))
+
+    return train_loader, test_loader
 
 
 def get_model(arch, fc_config):
@@ -39,8 +37,8 @@ def get_model(arch, fc_config):
     del fc_config["input_channel"]
     del fc_config["output_channel"]
     """
-    I am the supporter of the idea "one model -- one config". So I moved some values to the config
-    In order not to change the init ronin code I delete values from dictionary once I get them 
+    I am the supporter of the idea "one model -- one config". So I moved some testues to the config
+    In order not to change the init ronin code I delete testues from dictionary once I get them 
     """
     if arch == 'resnet18':
         network = ResNet1D(input_channel, output_channel, BasicBlock1D, [2, 2, 2, 2],
@@ -55,39 +53,52 @@ def get_model(arch, fc_config):
         network = ResNet1D(input_channel, output_channel, BasicBlock1D, [3, 4, 23, 3],
                            base_plane=64, output_block=FCOutputModule, **fc_config)
     else:
-        raise ValueError('Invalid architecture: ', args.arch)
+        raise testueError('Intestid architecture: ', args.arch)
     return network
 
 
 def train_ronin(args, fc_config):
+    output_root_path = Path(args.out_dir)
+    current_time = datetime.datetime.now()
+    
+    output_dir_name = f"{current_time.day}_{current_time.month}_{current_time.hour}_{current_time.minute}"
+
+    output_dir = output_root_path / output_dir_name
+
+    meta_save_dir = output_dir / "meta"
+    meta_save_dir.mkdir(parents=True)
+    trajectories_save_dir = output_dir / "trajectories"
+    trajectories_save_dir.mkdir(parents=True)
+    training_checkpoints = output_dir / "training_checkpoints"
+    training_checkpoints.mkdir(parents=True)
+    test_checkpoints = output_dir / "test_checkpoints"
+    test_checkpoints.mkdir(parents=True)
+
+    writer = SummaryWriter(output_dir)
 
     device = torch.device('cuda:0' if torch.cuda.is_available() and not args.cpu else 'cpu')
     if device.type == 'cpu':
         print("_"*50, "\n", "USING CPU FOR TRAININ", "_"*50, "\n")
 
-    train_dataset, train_loader, val_dataset, val_loader = build_datasets(args)
-
-    network = get_model(args.arch, fc_config).to(device)
+    train_loader, test_loader = build_datasets(args)
+    if args.model_path is not None:
+        checkpoints = torch.load(args.model_path)
+        network.load_state_dict(checkpoints.get('model_state_dict'))
+        optimizer.load_state_dict(checkpoints.get('optimizer_state_dict'))
+    else:
+        network = get_model(args.arch, fc_config).to(device)
     total_params = network.get_num_params()
-    print('Total number of parameters: ', total_params)
+    print('Total number of network\'s parameters: ', total_params)
 
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(network.parameters(), args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=10, eps=1e-12)
-    train_losses_all, val_losses_all = [], []
+    # TODO: probably in the future we should move this scheduler parameters to config as well
 
-    init_train_targ, init_train_pred = run_test(network, train_loader, device, eval_mode=False)
-
-    init_train_loss = np.mean((init_train_targ - init_train_pred) ** 2, axis=0)
-    train_losses_all.append(np.mean(init_train_loss))
-    best_val_loss = np.inf
-
-    writer = SummaryWriter(args.out_dir) 
-    train_iteration_tracker, val_iteration_tracker = 1, 1
-
+    train_iteration_tracker, test_iteration_tracker = 1, 1
+    best_ate, best_rte = np.inf, np.inf
     try:
-        for _ in range(args.epochs):
-            print("val_iteration_tracker:  ", val_iteration_tracker)
+        for epoch in range(args.epochs):
             network.train()
             for feat, targ, _, _ in train_loader:  # feat targ and ???????? why do we even need to more args if we do not us it?
                 feat, targ = feat.to(device), targ.to(device)
@@ -100,23 +111,24 @@ def train_ronin(args, fc_config):
                 writer.add_scalar('Loss/train', train_loss.detach().cpu(), train_iteration_tracker)
                 train_iteration_tracker += 1
 
-            if val_iteration_tracker % args.validation_step == 0:
-                if val_loader is not None:
-                    val_outs, val_targets = run_test(network, val_loader, device, eval_mode=True)
-                    val_losses = np.average((val_outs - val_targets) ** 2, axis=0)
-                    avg_loss = np.average(val_losses)
-                    scheduler.step(avg_loss)
-                    writer.add_scalar('Loss/val', avg_loss, val_iteration_tracker)
-            val_iteration_tracker += 1
+            model_path = training_checkpoints / f"checkpoint_{epoch}.pt"
+            torch.save({'model_state_dict': network.state_dict(),
+                        'epoch': epoch,
+                        'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                
+            
+            if test_iteration_tracker % args.test_step == 0:
+                test_outs, test_targets = run_test(network, test_loader, device, etest_mode=True)
+                test_losses = np.average((test_outs - test_targets) ** 2, axis=0)
+                avg_loss = np.average(test_losses)
+                scheduler.step(avg_loss)
+                writer.add_scalar('Loss/test', avg_loss, test_iteration_tracker)
 
-
-            if val_iteration_tracker % args.display_trajectories_step == 0:
-                with open(args.val_list) as f:
+                with open(args.test_list) as f:
                     test_data_list = [s.strip().split(',' or ' ')[0] for s in f.readlines() if len(s) > 0 and s[0] != '#']
                 for data in test_data_list:
-                    print(args.root_dir, data)
                     seq_dataset = get_dataset(args.root_dir, [data], args, mode='test')
-                    seq_loader = DataLoader(seq_dataset, batch_size=1024, shuffle=False)
+                    seq_loader = DataLoader(seq_dataset, batch_size=args.test_batch_size, shuffle=False)
                     ind = np.array([i[1] for i in seq_dataset.index_map if i[0] == 0], dtype=np.int32)
                     preds_seq, targets_seq, losses_seq, ate_all, rte_all = [], [], [], [], []
                     traj_lens = []
@@ -162,34 +174,42 @@ def train_ronin(args, fc_config):
                         plt.title('{}, error: {:.6f}'.format(targ_names[i], losses[i]))
                     plt.tight_layout()
 
-                    if args.show_plot:
-                        plt.show()
-
-                    print(args.out_dir, osp.isdir(args.out_dir))
-                    if args.out_dir is not None and osp.isdir(args.out_dir):
-                        np.save(osp.join("./", "data", data + '_gsn.npy'),
-                                np.concatenate([pos_pred[:, :2], pos_gt[:, :2]], axis=1))
-                        plt.savefig(osp.join("./data", data + '_gsn.png'))
-                    writer.add_figure(data + '.png', plt.gcf(), global_step=val_iteration_tracker)
+                    np.save(trajectories_save_dir / data + '_gsn.npy', np.concatenate([pos_pred[:, :2], pos_gt[:, :2]], axis=1))
+                    writer.add_figure(data + '.png', plt.gcf(), global_step=test_iteration_tracker)
                     plt.close('all')
                     
 
                     losses_seq = np.stack(losses_seq, axis=0)
                     losses_avg = np.mean(losses_seq, axis=1)
                     # Export a csv file
-                    if args.out_dir is not None and osp.isdir(args.out_dir):
-                        with open(osp.join(args.out_dir, 'losses.csv'), 'w') as f:
-                            if losses_seq.shape[1] == 2:
-                                f.write('seq,vx,vy,avg,ate,rte\n')
-                            else:
-                                f.write('seq,vx,vy,vz,avg,ate,rte\n')
-                            for i in range(losses_seq.shape[0]):
-                                f.write('{},'.format(args.val_list[i]))
-                                for j in range(losses_seq.shape[1]):
-                                    f.write('{:.6f},'.format(losses_seq[i][j]))
-                                f.write('{:.6f},{:6f},{:.6f}\n'.format(losses_avg[i], ate_all[i], rte_all[i]))
+
+                    with open(output_dir / "losses.csv", 'w') as f:
+                        if losses_seq.shape[1] == 2:
+                            f.write('seq,vx,vy,avg,ate,rte\n')
+                        else:
+                            f.write('seq,vx,vy,vz,avg,ate,rte\n')
+                        for i in range(losses_seq.shape[0]):
+                            f.write('{},'.format(args.test_list[i]))
+                            for j in range(losses_seq.shape[1]):
+                                f.write('{:.6f},'.format(losses_seq[i][j]))
+                            f.write('{:.6f},{:6f},{:.6f}\n'.format(losses_avg[i], ate_all[i], rte_all[i]))
+
+                    if np.mean(ate_all) < best_ate:
+                        best_ate = np.mean(ate_all)
+                        model_path = test_checkpoints / f"best_ate_%.4f.pt" % best_ate
+                        torch.save({'model_state_dict': network.state_dict(),
+                        'epoch': epoch,
+                        'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                    if np.mean(rte_all) < best_rte:
+                        best_rte = np.mean(rte_all)
+                        model_path = test_checkpoints / f"best_rte_%.4f.pt" % best_rte
+                        torch.save({'model_state_dict': network.state_dict(),
+                        'epoch': epoch,
+                        'optimizer_state_dict': optimizer.state_dict()}, model_path)
 
 
+
+            test_iteration_tracker += 1
 
     except KeyboardInterrupt:
         print('-' * 60)
@@ -200,42 +220,16 @@ def train_ronin(args, fc_config):
 
 if __name__ == '__main__':
     import argparse
+    import yaml
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_list', type=str, required=True)
-    parser.add_argument('--val_list', type=str, default=None)
-    parser.add_argument('--test_list', type=str, default=None)
-    parser.add_argument('--test_path', type=str, default=None)
-    parser.add_argument('--root_dir', type=str, default=None, help='Path to data directory')
-    parser.add_argument('--cache_path', type=str, default=None, help='Path to cache folder to store processed data')
-    parser.add_argument('--dataset', type=str, default='ronin', choices=['ronin', 'ridi'])
-    parser.add_argument('--max_ori_error', type=float, default=20.0)
-    parser.add_argument('--step_size', type=int, default=10)
-    parser.add_argument('--window_size', type=int, default=200)
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
-    parser.add_argument('--lr', type=float, default=1e-04)
-    parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=10000)
-    parser.add_argument('--arch', type=str, default='resnet18')
-    parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--run_ekf', action='store_true')
-    parser.add_argument('--fast_test', action='store_true')
-    parser.add_argument('--show_plot', action='store_true')
+    parser.add_argument('--config', type=str, default="./configs/ronin_baseline_config.yaml", help='Path to the config for Ronin')
 
-    parser.add_argument('--continue_from', type=str, default=None)
-    parser.add_argument('--out_dir', type=str, default=None)
-    parser.add_argument('--model_path', type=str, default=None)
-    parser.add_argument('--feature_sigma', type=float, default=0.00001)
-    parser.add_argument('--target_sigma', type=float, default=0.00001)
+    starting_args = parser.parse_args()
+    config_dict = yaml.safe_load(open(starting_args.config))
 
-    parser.add_argument('--validation_step', type=int, default=1, help='How often, in terms of epochs, run validation')
-    parser.add_argument('--display_trajectories_step', type=int, default=1, help='How often, in terms of epochs, dusplay trajectories')
-
-    args = parser.parse_args()
-
+    args = argparse.Namespace(**config_dict)
 
     fc_config = {'fc_dim': 512, 'in_dim': 7, 'dropout': 0.5, 'trans_planes': 128, "input_channel": 6, "output_channel": 2}
     fc_config['in_dim'] = args.window_size // 32 + 1
-    print(type(args))
-
     train_ronin(args, fc_config)
