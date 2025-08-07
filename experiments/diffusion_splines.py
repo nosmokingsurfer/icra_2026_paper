@@ -251,8 +251,8 @@ def sample_from_diffusion(model, diffusion, noisy_input, device):
 def demonstrate_denoising(trained_model, diffusion, dataset, device):
     # Get a sample from the dataset
     sample = dataset[0]
-    noisy = sample['noisy'].unsqueeze(0).to(device)
-    clean = sample['clean'].unsqueeze(0).to(device)
+    noisy = sample['imu'].unsqueeze(0).to(device)
+    clean = sample['clean_imu'].unsqueeze(0).to(device)
     
     # Denoise using the trained model
     denoised = sample_from_diffusion(trained_model, diffusion, noisy, device)
@@ -328,7 +328,7 @@ if __name__ == "__main__":
         spline_path=config['spline_path'],
         num_samples=config['num_samples'],
         window_size=config['window_size'],
-        mode='diffusion',
+        mode='both',
         noise_level=config['noise_level'],
         imu_freq=config['imu_freq']
     )
