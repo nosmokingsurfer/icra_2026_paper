@@ -210,6 +210,136 @@ class Spline_2D_Dataset(Dataset):
         return regular_collate
 
 
+
+# TODO need to merge SplineIMUDataset class into Spline_2D_Dataset - the difference is small
+# just need to add mode argument so either prepare and collate data for first, second or for both modes
+# experiments `fgo_nn_splines` and `diffusion_splines` must work from the same dataset and data
+class SplineIMUDataset(Dataset):
+    def __init__(self, spline_path=None, num_samples=20, window_size=200, stride=20,
+                 enable_noise=True, mode='both', noise_level=0.2, imu_freq=100.0):
+        """
+        Dataset for 2D spline trajectories with IMU data generation.
+        
+        Args:
+            spline_path: Path to spline files (if None, generates synthetic splines)
+            num_samples: Number of synthetic samples to generate (if spline_path is None)
+            window_size: Size of sliding window for regular models
+            stride: Stride for sliding window
+            enable_noise: Whether to add noise to measurements
+            mode: 'odometry' for supervised odometry learning or 'diffusion' for diffusion models or 'both' for both
+            noise_level: Amount of noise for diffusion models (0-1)
+            imu_freq: IMU sampling frequency in Hz
+        """
+        self.samples = []
+        self.window_size = window_size
+        self.stride = stride
+        self.enable_noise = enable_noise
+        self.mode = mode
+
+        assert self.mode in ['odometry', 'diffusion', 'both']
+
+        self.noise_level = noise_level
+        self.dt = 1.0 / imu_freq
+        
+        # Noise parameters
+        self.bias_acc = np.array([0.1, 0.1])
+        self.bias_w = np.array([0.1])
+        self.Q_acc = np.diag([0.8**2, 0.8**2]) if enable_noise else np.zeros((2, 2))
+        self.Q_w = np.diag([0.15**2]) if enable_noise else np.zeros((1, 1))
+        
+        if spline_path is not None:
+            self._load_splines_from_files(spline_path)
+        else:
+            self._generate_synthetic_splines(num_samples)
+    
+    def _load_splines_from_files(self, spline_path):
+        """Load splines from text files and generate IMU data."""
+        paths = glob.glob(f'{spline_path}/spline_*.txt')
+        print(f"Found {len(paths)} spline files.")
+        
+        for path in tqdm(paths):
+            spline_points = np.genfromtxt(path)
+            self._process_spline(spline_points)
+    
+    def _generate_synthetic_splines(self, num_samples):
+        """Generate synthetic spline trajectories."""
+        for _ in tqdm(range(num_samples)):
+            # Generate random control points
+            num_ctrl_points = np.random.randint(3, 7)
+            ctrl_points = np.random.uniform(-1, 1, (num_ctrl_points, 2))
+            
+            # Create cubic spline
+            t = np.linspace(0, 1, num_ctrl_points)
+            cs_x = CubicSpline(t, ctrl_points[:, 0])
+            cs_y = CubicSpline(t, ctrl_points[:, 1])
+            
+            # Sample spline at regular intervals
+            t_samples = np.linspace(0, 1, 200)  # Fixed number of points
+            spline_points = np.column_stack((cs_x(t_samples), cs_y(t_samples)))
+            
+            self._process_spline(spline_points)
+    
+    def _process_spline(self, spline_points):
+        """Generate IMU data from spline points and create samples."""
+        acc, gyro, velocity, poses, tau = generate_imu_data(spline_points)
+        w_z = gyro
+        
+        if self.enable_noise:
+            noisy_acc = acc + np.random.multivariate_normal(self.bias_acc, self.Q_acc, acc.shape[0])
+            noisy_gyro = gyro + np.random.multivariate_normal(self.bias_w, self.Q_w, gyro.shape[0]).reshape(-1, 1)
+        else:
+            noisy_acc = acc.copy()
+            noisy_gyro = gyro.copy()
+        
+        imu_clean = np.concatenate([acc, gyro], axis=1)  # [T, 3]
+        imu_noisy = np.concatenate([noisy_acc, noisy_gyro], axis=1)  # [T, 3]
+        T = imu_clean.shape[0]
+        
+        for i in range(0, T - self.window_size + 1, self.stride):
+            sample = {}
+            if self.mode in ['odometry', 'both']:
+                # For regular odometry models, store windowed IMU with ground truth
+                imu_win = imu_noisy[i:i + self.window_size].T  # [3, W]
+                vel_win = velocity[i:i + self.window_size]  # [W, 2]
+                pose_win = poses[i:i + self.window_size]  # [W, 3]
+                w_z_win = w_z[i:i + self.window_size]     # [W, 1]
+                
+                sample.update({
+                    'imu': torch.tensor(imu_win, dtype=torch.float32),            # [3, W]
+                    'gt_vel': torch.tensor(vel_win.mean(axis=0), dtype=torch.float32),  # [2]
+                    'gt_poses': torch.tensor(pose_win.mean(axis=0), dtype=torch.float32),# [3]
+                    'w_z': torch.tensor(w_z_win.mean(), dtype=torch.float32).unsqueeze(0)  # [1]
+                })
+
+            if self.mode in ['diffusion', 'both']:
+                # For diffusion models, store pairs of clean and noisy IMU data
+                clean_win = imu_clean[i:i + self.window_size].T  # [3, W]
+                
+                sample.update({
+                    'clean_imu': torch.tensor(clean_win, dtype=torch.float32),
+                })
+            
+            self.samples.append(sample)
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        return self.samples[idx]
+    
+    def get_collate_fn(self):        
+        def diffusion_collate(batch):
+            noisy = torch.stack([item['imu'] for item in batch])
+            clean = torch.stack([item['clean_imu'] for item in batch])
+        
+            imu = torch.stack([item['imu'] for item in batch])
+            gt_vel = torch.stack([item['gt_vel'] for item in batch])
+            gt_poses = torch.stack([item['gt_poses'] for item in batch])
+            w_z = torch.stack([item['w_z'] for item in batch])
+            return {'imu': imu, 'gt_vel': gt_vel, 'gt_poses': gt_poses, 'w_z': w_z, 'noisy': noisy, 'clean': clean}
+        return diffusion_collate
+
+
 if __name__ == "__main__":
     output_path = './out/'
 
