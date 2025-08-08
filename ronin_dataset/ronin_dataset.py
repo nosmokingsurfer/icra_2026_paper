@@ -17,22 +17,36 @@ import quaternion
 
 
 class RoninDataset(Spline_2D_Dataset):
-    def __init__(self, data_dir = './data/seen_subjects_test_set', window = 100, step = 10, stride= 1000, sampling_rate=200, subseq_len = 1, enable_noise = not True):
+    def __init__(self,
+                data_dir = './data/seen_subjects_test_set',
+                take_log_num=-1,
+                window = 100,
+                step = 10,
+                stride= 1000,
+                sampling_rate=200,
+                subseq_len = 1,
+                mode = 'test',
+                enable_noise = not True):
         self.data_dir = data_dir
         self.window = window
         self.step = step
         self.stride = stride
         self.sampling_rate = 200.0
         self.subseq_len = subseq_len
+        self.mode = mode
         self.input_dim = 6
         self.pose_dim = 3
         self.enable_noise = enable_noise
+        self.take_log_num = take_log_num
 
         self.subsequences = [] 
 
         self.logs = list(Path(self.data_dir).rglob("**/data.hdf5"))
 
-        self.logs = [x.parent.stem for x in self.logs][:1] # TODO use all logs
+        self.logs = [x.parent.stem for x in self.logs] # TODO use all logs
+
+        if take_log_num > -1:
+            self.logs = self.logs[:take_log_num]
 
         self.seq_type = GlobSpeedSequence
 
@@ -66,7 +80,7 @@ class RoninDataset(Spline_2D_Dataset):
 if __name__ == "__main__":
 
 
-    dataset = RoninDataset(step=20, subseq_len=2000)
+    dataset = RoninDataset(take_log_num=1,step=20,stride=1000, subseq_len=1000,mode='train')
     print(len(dataset))
 
 

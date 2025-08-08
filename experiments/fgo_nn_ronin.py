@@ -171,6 +171,9 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         gt_poses_seq = sample['gt_poses_seq']
         dt = dataset.step/dataset.sampling_rate
 
+        # plt.plot(gt_poses_seq[:,0], gt_poses_seq[:,1])
+        # plt.show()
+
         S, C, W = imu_seq.shape
         vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
         pred_poses = integrate_pred_vel(vel_pred, gt_poses_seq, gt_poses_seq[0], dt=dt)  # [S, 3]
@@ -232,24 +235,18 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                            base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
     
     # model.load_state_dict(torch.load("out/model_fgo.pth"))
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.98)
 
     criterion = nn.MSELoss()
 
-    
 
     
-    # window_size=200
-    # step_size=20
-
-
-    
-    train_dataset = RoninDataset(step=20, window=200,subseq_len=subseq_len)
+    train_dataset = RoninDataset(take_log_num=-1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
     train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=train_dataset.get_collate_fn())
     print(len(train_dataset))
 
-    val_dataset = RoninDataset(step=20, window=200, subseq_len=2000)
+    val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     print(len(val_dataset))
     
@@ -258,7 +255,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     chi2_errors = []
     learning_rates = []
     
-    trajectories_to_save = 3
+    trajectories_to_save = 5
     results['num_val_traj'] = trajectories_to_save
 
     for epoch in range(n_epochs):
@@ -353,6 +350,9 @@ if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-    run_ronin_experiment(1, 100)
-    run_ronin_experiment(5, 100)
+    run_ronin_experiment(1, 200)
+    run_ronin_experiment(2, 200)
+    # run_ronin_experiment(3, 100)
+    # run_ronin_experiment(4, 100)
+    # run_ronin_experiment(5, 100)
     # run_spline_experiment(6, 100)

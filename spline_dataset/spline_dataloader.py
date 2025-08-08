@@ -85,7 +85,7 @@ class Spline_2D_Dataset(Dataset):
             subseq_len (int, optional): Number of windows in subsequence. Defaults to 1.
             enable_noise (bool, optional): IMU noise injection. Defaults to False.
         """
-    def __init__(self, spline_path, window = 100, step = 10, stride=10, sampling_rate=100, subseq_len = 1, enable_noise = False):
+    def __init__(self, spline_path, window = 100, step = 10, stride=10, sampling_rate=100, subseq_len = 1,mode='test', enable_noise = False):
         self.spline_path = spline_path
         self.window = window
         self.input_dim = 3
@@ -93,7 +93,7 @@ class Spline_2D_Dataset(Dataset):
         self.step = step
         self.sampling_rate = sampling_rate
         self.subseq_len = subseq_len
-        # TODO add self.stride parameter - offset between two sequential subsequences. now this value is equal to step which is actualy independent from stride
+        self.mode = mode
         self.stride = stride
         self.enable_noise = enable_noise
         self.subsequences = []  # List of (experiment_idx, ((slice_1_range),(slice_2_range),...))
@@ -175,6 +175,17 @@ class Spline_2D_Dataset(Dataset):
         velocities = np.array(velocities)
         gt_poses = np.array(gt_poses)
 
+
+        if self.mode == 'train' and (self.input_dim == 6):
+            if np.random.random(1) > 0.2:
+                theta = np.random.random(1)*2*np.pi
+                R = mrob.SO3([0,0,theta]).R()
+                slices[...,:3] = (R@slices[...,:3].reshape(-1,3,1)).reshape(self.subseq_len,-1,3)
+                slices[...,3:] = (R@slices[...,3:].reshape(-1,3,1)).reshape(self.subseq_len,-1,3)
+                velocities = (R[:2,:2]@velocities.reshape(self.subseq_len,2,1)).reshape(self.subseq_len,2)
+                gt_poses[:,:2] = (R[:2,:2]@gt_poses[:,:2].reshape(self.subseq_len,2,1)).reshape(self.subseq_len,2)
+                gt_poses[:,2] += theta
+
         imu_seq = torch.tensor(slices, dtype=torch.float32).permute(0, 2, 1)    # [S, 3, window]
         vel_seq = torch.tensor(velocities, dtype=torch.float32)                 # [S, 2]
         gt_pose_seq = torch.tensor(gt_poses, dtype=torch.float32)               # [S, 3]
@@ -222,7 +233,7 @@ if __name__ == "__main__":
         number_of_control_nodes = 10
         generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
 
-    dataset = Spline_2D_Dataset(path_to_splines, window=100,subseq_len=5, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, window=100, subseq_len=1, mode='train', enable_noise= not True)
 
     print(f"{dataset.__len__()=}")
     print(f"{dataset.__getitem__(0)=}")
