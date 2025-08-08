@@ -1,10 +1,10 @@
-train_list: "/mnt/d/Projects/ronin/lists/list_train.txt"
-test_list:  "/mnt/d/Projects/ronin/lists/list_test_seen.txt"
-root_dir: "/mnt/d/Projects/ronin/data/Data/train_set"
-out_dir: "/mnt/d/Projects/icra_2026_paper/output"
+train_list: "./external/ronin/lists/list_train.txt"
+test_list:  "./external/ronin/lists/list_test_seen.txt"
+root_dir: "path_to_the_dataset"
+out_dir: "./out/ronin_baseline"
 mode: train
 arch: resnet18
-model_path: "/mnt/d/Projects/icra_2026_paper/output/current_date_6_8_current_time_17_25/test_checkpoints/best_ate.pt"
+model_path: 
 
 test_step: 1
 

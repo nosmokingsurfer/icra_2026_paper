@@ -102,7 +102,7 @@ def train_ronin(args, fc_config):
     print('Total number of network\'s parameters: ', total_params)
     
 
-    train_iteration_tracker, test_iteration_tracker = 1, 1
+    train_iteration_tracker = 1
     best_ate, best_rte = np.inf, np.inf
     try:
         for epoch in range(args.epochs):
@@ -124,12 +124,12 @@ def train_ronin(args, fc_config):
                         'optimizer_state_dict': optimizer.state_dict()}, model_path)
                 
             
-            if test_iteration_tracker % args.test_step == 0:
+            if epoch % args.test_step == 0:
                 test_outs, test_targets = run_test(network, test_loader, device, eval_mode=True)
                 test_losses = np.average((test_outs - test_targets) ** 2, axis=0)
                 avg_loss = np.average(test_losses)
                 scheduler.step(avg_loss)
-                writer.add_scalar('Loss/test', avg_loss, test_iteration_tracker)
+                writer.add_scalar('Loss/test', avg_loss, epoch)
 
                 with open(args.test_list) as f:
                     test_data_list = [s.strip().split(',' or ' ')[0] for s in f.readlines() if len(s) > 0 and s[0] != '#']
@@ -182,7 +182,7 @@ def train_ronin(args, fc_config):
                     plt.tight_layout()
 
                     np.save(trajectories_save_dir / f"{data}_gsn.npy", np.concatenate([pos_pred[:, :2], pos_gt[:, :2]], axis=1))
-                    writer.add_figure(data + '.png', plt.gcf(), global_step=test_iteration_tracker)
+                    writer.add_figure(data + '.png', plt.gcf(), global_step=epoch)
                     plt.close('all')
                     
 
@@ -217,8 +217,6 @@ def train_ronin(args, fc_config):
 
 
 
-            test_iteration_tracker += 1
-
     except KeyboardInterrupt:
         print('-' * 60)
         print('Early terminate')
@@ -237,7 +235,7 @@ if __name__ == '__main__':
     config_dict = yaml.safe_load(open(starting_args.config))
 
     args = argparse.Namespace(**config_dict)
-
+    
     fc_config = {'fc_dim': 512, 'in_dim': 7, 'dropout': 0.5, 'trans_planes': 128, "input_channel": 6, "output_channel": 2}
     fc_config['in_dim'] = args.window_size // 32 + 1
     train_ronin(args, fc_config)
