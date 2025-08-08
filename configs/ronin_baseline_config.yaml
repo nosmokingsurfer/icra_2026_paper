@@ -1,0 +1,28 @@
+train_list: "./external/ronin/lists/list_train.txt"
+test_list:  "./external/ronin/lists/list_test_seen.txt"
+root_dir: "path_to_the_dataset"
+out_dir: "./out/ronin_baseline"
+mode: train
+arch: resnet18
+model_path: 
+
+test_step: 1
+
+feature_sigma: 1.0e-05
+target_sigma: 1.0e-05
+max_ori_error: 20
+step_size: 10
+window_size: 200
+lr: 0.0001
+train_batch_size: 128
+test_batch_size: 256
+epochs: 10000
+
+cpu: false
+run_ekf: false
+fast_test: false
+show_plot: false
+
+# legacy args. will not be used by us, but still used in original ronin
+dataset: "ronin"
+cache_path: None
