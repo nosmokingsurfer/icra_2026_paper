@@ -8,11 +8,11 @@ from tqdm import tqdm
 import os
 from datetime import datetime
 
-from spline_dataset.spline_dataloader import SplineIMUDataset
+from spline_dataset.spline_dataloader import Spline_2D_Dataset
 
 # Define the UNet model for IMU denoising
 class IMUDenoiser(nn.Module):
-    def __init__(self, input_channels=3, window_size=20):
+    def __init__(self, input_channels=3, window=20):
         super().__init__()
         
         # Encoder
@@ -58,7 +58,7 @@ class IMUDenoiser(nn.Module):
         self.pool = nn.AdaptiveAvgPool1d(1)
         
     def forward(self, x, t):
-        # x shape: [batch, channels, window_size]
+        # x shape: [batch, channels, window]
         # t shape: [batch]
         
         # Time embedding
@@ -111,13 +111,13 @@ def train_diffusion_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Create dataset and dataloader
-    dataset = SplineIMUDataset(
+    dataset = Spline_2D_Dataset(
         spline_path=config['spline_path'],
-        num_samples=config['num_samples'],
-        window_size=config['window_size'],
+        window=config['window'],
         mode='both',
+        enable_noise=True,
         noise_level=config['noise_level'],
-        imu_freq=config['imu_freq']
+        sampling_rate=config['sampling_rate']
     )
     
     dataloader = DataLoader(
@@ -131,7 +131,7 @@ def train_diffusion_model(config):
     # Initialize model and diffusion process
     model = IMUDenoiser(
         input_channels=3,  # ax, ay, ωz
-        window_size=config['window_size']
+        window=config['window']
     ).to(device)
     
     diffusion = DiffusionProcess(T=config['T'])
@@ -151,15 +151,19 @@ def train_diffusion_model(config):
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config['num_epochs']}")
         
         for batch in progress_bar:
-            clean = batch['clean'].to(device)
-            noisy = batch['noisy'].to(device)
-            batch_size = clean.shape[0]
+
+            clean = batch['clean_imu'].to(device)
+            noisy = batch['noisy_imu'].to(device)
+
+
+            B,S,C,W = clean.shape
+            batch_size = B*S
             
             # Sample random timesteps
             t = diffusion.sample_timesteps(batch_size).to(device)
             
             # Forward diffusion (add noise to clean data)
-            x_t, noise = diffusion.forward_diffusion(clean, t)
+            x_t, noise = diffusion.forward_diffusion(clean.reshape(batch_size,C,W), t)
             
             # Predict noise
             predicted_noise = model(x_t, t)
@@ -185,13 +189,13 @@ def train_diffusion_model(config):
             
             with torch.no_grad():
                 for val_batch in dataloader:
-                    clean = val_batch['clean'].to(device)
-                    noisy = val_batch['noisy'].to(device)
+                    clean = val_batch['clean_imu'].to(device)
+                    noisy = val_batch['noisy_imu'].to(device)
                     
                     # Use same timestep for validation (mid-range)
-                    t = torch.full((clean.shape[0],), diffusion.T//2).to(device)
+                    t = torch.full((B*S,), diffusion.T//2).to(device)
                     
-                    x_t, noise = diffusion.forward_diffusion(clean, t)
+                    x_t, noise = diffusion.forward_diffusion(clean.reshape(B*S,C,W), t)
                     predicted_noise = model(x_t, t)
                     
                     val_loss = criterion(predicted_noise, noise)
@@ -251,8 +255,12 @@ def sample_from_diffusion(model, diffusion, noisy_input, device):
 def demonstrate_denoising(trained_model, diffusion, dataset, device):
     # Get a sample from the dataset
     sample = dataset[0]
-    noisy = sample['imu'].unsqueeze(0).to(device)
-    clean = sample['clean_imu'].unsqueeze(0).to(device)
+    if len(sample['noisy_imu'].shape) == 2:
+        noisy = sample['noisy_imu'].unsqueeze(0).to(device)
+        clean = sample['clean_imu'].unsqueeze(0).to(device)
+    else:
+        noisy = sample['noisy_imu'].to(device)
+        clean = sample['clean_imu'].to(device)
     
     # Denoise using the trained model
     denoised = sample_from_diffusion(trained_model, diffusion, noisy, device)
@@ -294,11 +302,11 @@ if __name__ == "__main__":
     # Configuration
     config = {
         'spline_path': './out/splines',  # or path to your spline files
-        'num_samples': 5000,  # if using synthetic data
-        'window_size': 200,
+        
+        'window': 200,
         'noise_level': 0.2,
         'stride' : 20,
-        'imu_freq': 100.0,
+        'sampling_rate': 100.0,
         'batch_size': 64,
         'num_workers': 0,
         'num_epochs': 100,
@@ -316,7 +324,7 @@ if __name__ == "__main__":
         trained_model_state = torch.load(open('model.pt','rb'),'cpu')
         trained_model = IMUDenoiser(
             input_channels=3,  # ax, ay, ωz
-            window_size=config['window_size']
+            window=config['window']
         ).to('cpu')
 
         trained_model.load_state_dict(trained_model_state)
@@ -324,13 +332,13 @@ if __name__ == "__main__":
 
 
 
-    dataset = SplineIMUDataset(
+    dataset = Spline_2D_Dataset(
         spline_path=config['spline_path'],
-        num_samples=config['num_samples'],
-        window_size=config['window_size'],
+        window=config['window'],
         mode='both',
+        enable_noise=True,
         noise_level=config['noise_level'],
-        imu_freq=config['imu_freq']
+        sampling_rate=config['sampling_rate']
     )
     device='cpu'
 

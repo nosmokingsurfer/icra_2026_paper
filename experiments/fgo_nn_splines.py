@@ -167,9 +167,9 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         result = {}
 
         sample  = dataset.__getitem__(i)
-        imu_seq = sample['imu_seq']
-        vel_seq = sample['gt_vel_seq']
-        gt_poses_seq = sample['gt_poses_seq']
+        imu_seq = sample['noisy_imu']
+        vel_seq = sample['gt_vel']
+        gt_poses_seq = sample['gt_poses']
         dt = dataset.step/dataset.sampling_rate
 
         S, C, W = imu_seq.shape
@@ -257,10 +257,21 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     step_size=10
     sampling_rate =100
     
-    dataset = Spline_2D_Dataset(path_to_splines, window=window_size,sampling_rate=100, subseq_len=subseq_len, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, 
+                                window=window_size,
+                                sampling_rate=100,
+                                subseq_len=subseq_len,
+                                mode='regression',
+                                enable_noise= not True)
+
     train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True, collate_fn=dataset.get_collate_fn())
 
-    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True)
+    val_dataset = Spline_2D_Dataset(path_to_splines,
+                                window=window_size,
+                                subseq_len=89,
+                                mode='regression',
+                                enable_noise= not True)
+
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     
     dt = step_size/sampling_rate
@@ -281,7 +292,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
         
         for sample in tqdm(train_dataloader, position=0, leave=True):
             # sample  = dataset.__getitem__(i)
-            imu_seq = sample['imu']
+            imu_seq = sample['noisy_imu']
             vel_seq = sample['gt_vel']
             gt_poses_seq = sample['gt_poses']
             
