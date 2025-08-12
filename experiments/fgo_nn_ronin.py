@@ -58,6 +58,7 @@ def integrate_pred_vel(pred_vel, gt_poses, gt_pose0, dt=0.01):
 def populate_graph(pred_poses, gt_poses):
     graph = mrob.FGraphDiff()
 
+    # TODO check for ronin data
     W_odo = torch.eye(6) * 10.0
     W_gps = torch.eye(6) * 1.0
 
@@ -136,7 +137,7 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     # Step 2: build & solve graph
     graph = populate_graph(pred_poses, gt_pose_seq)  # FGraphDiff
     graph.build_jacobians()
-    graph.solve(mrob.FGraphDiff_LM, maxIters=100)
+    graph.solve(mrob.FGraphDiff_LM, maxIters=100, verbose= not True)
     dL_dz = graph.get_dx_dz() / dt  # [6S, 6S + (S-1)*S]
 
     # Step 3: compute delta_x
@@ -175,7 +176,17 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         # plt.show()
 
         S, C, W = imu_seq.shape
-        vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
+
+        gyro_acc_imu = torch.zeros_like(imu_seq.reshape(-1, C, W))
+        gyro_acc_imu[:,:3,:] = imu_seq.reshape(-1, C, W)[:,3:,:]
+        gyro_acc_imu[:,3:,:] = imu_seq.reshape(-1, C, W)[:,:3,:]
+
+
+
+        # make GT prediction at first epochs
+        vel_pred = model(gyro_acc_imu).reshape(S, -1)
+
+
         pred_poses = integrate_pred_vel(vel_pred, gt_poses_seq, gt_poses_seq[0], dt=dt)  # [S, 3]
         graph = populate_graph(pred_poses, gt_poses_seq)
         # graph.solve(mrob.FGraphDiff_LM, maxIters=100)
@@ -233,20 +244,28 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
     model = ResNet1D(_input_channel, _output_channel, BasicBlock1D, [2, 2, 2, 2],
                            base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
-    
-    # model.load_state_dict(torch.load("out/model_fgo.pth"))
+    model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.98)
 
     criterion = nn.MSELoss()
 
 
-    
-    train_dataset = RoninDataset(take_log_num=-1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
+    if os.path.exists('./out/ronin_cache/train_dataset.pkl'):
+        train_dataset = pickle.load(open('./out/ronin_cache/train_dataset.pkl','rb'))
+    else:
+        train_dataset = RoninDataset(take_log_num=-1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
+        pickle.dump(train_dataset,open('./out/ronin_cache/train_dataset.pkl','wb'))
+
     train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=train_dataset.get_collate_fn())
     print(len(train_dataset))
 
-    val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
+
+    if os.path.exists('./out/ronin_cache/val_dataset.pkl'):
+        val_dataset = pickle.load(open('./out/ronin_cache/val_dataset.pkl','rb'))
+    else:
+        val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
+        pickle.dump(val_dataset,open('./out/ronin_cache/val_dataset.pkl','wb'))
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     print(len(val_dataset))
     
@@ -278,8 +297,14 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
             assert S == subseq_len
 
+
+            gyro_acc_imu = torch.zeros_like(imu_seq.reshape(-1, C, W))
+            gyro_acc_imu[:,:3,:] = imu_seq.reshape(-1, C, W)[:,3:,:]
+            gyro_acc_imu[:,3:,:] = imu_seq.reshape(-1, C, W)[:,:3,:]
+
+
             # running model inference for all slices at once
-            vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
+            vel_pred = model(gyro_acc_imu).reshape(B, S, -1)
             
             optimizer.zero_grad()
 
@@ -289,6 +314,11 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
                 total_chi2 = 0
                 total_rmse = 0
+
+                # for b in range(B):
+                #     all_grads[b], chi2, rmse = process_one_graph(vel_pred[b].detach(), gt_poses_seq[b].detach(),dt)
+                #     total_chi2 += chi2
+                #     total_rmse += rmse
 
                 with Pool(8) as p:
                     res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach(), gt_poses_seq[b].detach(), dt)) for b in range(B)]
@@ -309,7 +339,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                 total_rmse += loss.detach().cpu().item()
                 total_chi2 = np.nan
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-5)
             optimizer.step()
             scheduler.step()
         
@@ -350,9 +380,9 @@ if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-    run_ronin_experiment(1, 200)
-    run_ronin_experiment(2, 200)
-    # run_ronin_experiment(3, 100)
+    # run_ronin_experiment(1, 300)
+    # run_ronin_experiment(20, 200)
+    run_ronin_experiment(3, 100)
     # run_ronin_experiment(4, 100)
     # run_ronin_experiment(5, 100)
-    # run_spline_experiment(6, 100)
+    # run_ronin_experiment(6, 300)
