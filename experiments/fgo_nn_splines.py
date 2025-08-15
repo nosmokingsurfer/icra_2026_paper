@@ -335,7 +335,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             optimizer.step()
-            scheduler.step()
+        scheduler.step()
         
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
