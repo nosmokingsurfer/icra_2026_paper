@@ -167,13 +167,13 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         result = {}
 
         sample  = dataset.__getitem__(i)
-        imu_seq = sample['noisy_imu']
+        imu_seq = sample['noisy_imu'].to(device)
         vel_seq = sample['gt_vel']
         gt_poses_seq = sample['gt_poses']
         dt = dataset.step/dataset.sampling_rate
 
         S, C, W = imu_seq.shape
-        vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1)
+        vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1).detach().cpu()
         pred_poses = integrate_pred_vel(vel_pred, gt_poses_seq, gt_poses_seq[0], dt=dt)  # [S, 3]
         graph = populate_graph(pred_poses, gt_poses_seq)
         # graph.solve(mrob.FGraphDiff_LM, maxIters=100)
@@ -210,6 +210,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         pickle.dump(result, open(f'{output_path}idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 
+
 def run_spline_experiment(subseq_len = 3, n_epochs=300):
     '''
     Odometry model training pipeline on spline dataset
@@ -225,7 +226,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}/"
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ResNet1D(
         num_inputs=3,       
         num_outputs=2,         
@@ -238,8 +239,8 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
         in_dim=7,            
         dropout=0.5,
         trans_planes=128
-    )
-    
+    ).to(device)
+
     # model.load_state_dict(torch.load("out/model_fgo.pth"))
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
@@ -285,15 +286,14 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     for epoch in range(n_epochs):
 
         # running validation every epoch
-        run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save)
-            
+        run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, device)
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
         
         for sample in tqdm(train_dataloader, position=0, leave=True):
             # sample  = dataset.__getitem__(i)
-            imu_seq = sample['noisy_imu']
-            vel_seq = sample['gt_vel']
+            imu_seq = sample['noisy_imu'].to(device)
+            vel_seq = sample['gt_vel'].to(device)
             gt_poses_seq = sample['gt_poses']
             
             # imu_seq: [B, S, 3, W]
@@ -315,7 +315,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
                 total_rmse = 0
 
                 with Pool(8) as p:
-                    res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach(), gt_poses_seq[b].detach(), dt)) for b in range(B)]
+                    res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach().cpu(), gt_poses_seq[b].detach().cpu(), dt)) for b in range(B)]
 
 
                     for i, r in enumerate(res):
@@ -323,7 +323,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
                         total_chi2 += chi2
                         total_rmse += rmse
 
-                grad_tensor = torch.stack(all_grads)  # [B, S, 2]
+                grad_tensor = torch.stack(all_grads).to(device)  # [B, S, 2]
                 vel_pred.backward(gradient= - grad_tensor)
 
             else:
@@ -335,7 +335,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             optimizer.step()
-            scheduler.step()
+        scheduler.step()
         
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
