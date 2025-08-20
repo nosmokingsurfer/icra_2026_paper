@@ -246,26 +246,27 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                            base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
     model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.98)
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = 'min', factor=0.9, patience=5)
 
     criterion = nn.MSELoss()
 
 
-    if os.path.exists('./out/ronin_cache/train_dataset.pkl'):
-        train_dataset = pickle.load(open('./out/ronin_cache/train_dataset.pkl','rb'))
+    if os.path.exists(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl'):
+        train_dataset = pickle.load(open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','rb'))
     else:
-        train_dataset = RoninDataset(take_log_num=-1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
-        pickle.dump(train_dataset,open('./out/ronin_cache/train_dataset.pkl','wb'))
+        train_dataset = RoninDataset(take_log_num=1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
+        pickle.dump(train_dataset,open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','wb'))
 
-    train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=train_dataset.get_collate_fn())
+    train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=train_dataset.get_collate_fn())
     print(len(train_dataset))
 
 
-    if os.path.exists('./out/ronin_cache/val_dataset.pkl'):
-        val_dataset = pickle.load(open('./out/ronin_cache/val_dataset.pkl','rb'))
+    if os.path.exists(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl'):
+        val_dataset = pickle.load(open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','rb'))
     else:
         val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
-        pickle.dump(val_dataset,open('./out/ronin_cache/val_dataset.pkl','wb'))
+        pickle.dump(val_dataset,open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','wb'))
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     print(len(val_dataset))
     
@@ -305,6 +306,9 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
             # running model inference for all slices at once
             vel_pred = model(gyro_acc_imu).reshape(B, S, -1)
+
+            alpha = 0.99
+            vel_simple = alpha*vel_seq + (1-alpha)*vel_pred
             
             optimizer.zero_grad()
 
@@ -321,7 +325,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                 #     total_rmse += rmse
 
                 with Pool(8) as p:
-                    res = [p.apply_async(process_one_graph, args=(vel_pred[b].detach(), gt_poses_seq[b].detach(), dt)) for b in range(B)]
+                    res = [p.apply_async(process_one_graph, args=(vel_simple[b].detach(), gt_poses_seq[b].detach(), dt)) for b in range(B)]
 
 
                     for i, r in enumerate(res):
@@ -330,10 +334,10 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                         total_rmse += rmse
 
                 grad_tensor = torch.stack(all_grads)  # [B, S, 2]
-                vel_pred.backward(gradient= - grad_tensor)
+                vel_simple.backward(gradient= - grad_tensor)
 
             else:
-                loss = torch.linalg.norm(vel_pred - vel_seq)
+                loss = torch.linalg.norm(vel_simple - vel_seq)
                 loss.backward()
 
                 total_rmse += loss.detach().cpu().item()
@@ -341,14 +345,14 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-5)
             optimizer.step()
-            scheduler.step()
+        scheduler.step(total_rmse)
         
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
-        learning_rates.append(scheduler.get_last_lr()[0])
+        learning_rates.append(scheduler._last_lr[0])
 
         print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
-        print(f"Learning Rate : {scheduler.get_last_lr()}")
+        print(f"Learning Rate : {scheduler._last_lr}")
         results['n_actual_epochs'] += 1
 
         results['chi2_errors'] = chi2_errors
@@ -380,9 +384,9 @@ if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-    # run_ronin_experiment(1, 300)
+    run_ronin_experiment(1, 300)
     # run_ronin_experiment(20, 200)
-    run_ronin_experiment(3, 100)
+    # run_ronin_experiment(3, 100)
     # run_ronin_experiment(4, 100)
     # run_ronin_experiment(5, 100)
-    # run_ronin_experiment(6, 300)
+    run_ronin_experiment(15, 300)

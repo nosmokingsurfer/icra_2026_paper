@@ -179,7 +179,7 @@ class Spline_2D_Dataset(Dataset):
         if self.mode == 'train' and (self.input_dim == 6):
             if np.random.random(1) > 0.2:
                 theta = np.random.random(1)*2*np.pi
-                R = mrob.SO3([0,0,theta]).R()
+                R = mrob.SO3([0,0,theta[0]]).R()
                 slices[...,:3] = (R@slices[...,:3].reshape(-1,3,1)).reshape(self.subseq_len,-1,3)
                 slices[...,3:] = (R@slices[...,3:].reshape(-1,3,1)).reshape(self.subseq_len,-1,3)
                 velocities = (R[:2,:2]@velocities.reshape(self.subseq_len,2,1)).reshape(self.subseq_len,2)
