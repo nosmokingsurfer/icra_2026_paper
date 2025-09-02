@@ -22,7 +22,7 @@ from torch.multiprocessing import Pool
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
-from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
+from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte, save_file_split
 
 from metric import compute_ate_rte
 from ronin_resnet import get_model
@@ -155,7 +155,7 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     
     return grad_final, chi2, rmse
 
-def run_validation(epoch, output_path, model, dataset, num_traj):
+def run_validation(epoch, output_path, model, dataset, num_traj, device):
     model.eval()
 
     assert num_traj <= len(dataset)
@@ -270,13 +270,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, is_val = True)
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
-    source_train_split_file = os.path.join(path_to_splines, "train_split.txt")
-    dst_train_split_file = os.path.join(output_path, "train_split.txt")
-    shutil.copyfile(source_train_split_file, dst_train_split_file)
-
-    source_val_split_file = os.path.join(path_to_splines, "val_split.txt")
-    dst_val_split_file = os.path.join(output_path, "val_split.txt")
-    shutil.copyfile(source_val_split_file, dst_val_split_file)
+    save_file_split(path_to_splines, output_path)
     
     dt = step_size/sampling_rate
     rmse_errors = []
