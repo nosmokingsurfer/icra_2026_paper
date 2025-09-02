@@ -5,6 +5,8 @@ import os
 import shutil
 from matplotlib.backend_bases import MouseButton
 
+np.random.seed(42)
+
 def bspline(cv, n=100, degree=4, periodic=False):
     """Calculate n samples on a bspline."""
     cv = np.asarray(cv)
