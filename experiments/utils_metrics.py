@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import os
-
+import shutil
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path('./external/ronin/source/').resolve()))
@@ -38,3 +38,13 @@ def compute_rmse_and_yaw(graph, gt_poses, delta_x, plot=False, output_dir=None):
     rmse_trans = np.sqrt(sum_trans_sq / N)
 
     return rmse_trans
+
+
+def save_file_split(path_to_splines, output_path):
+    source_train_split_file = os.path.join(path_to_splines, "train_split.txt")
+    dst_train_split_file = os.path.join(output_path, "train_split.txt")
+    shutil.copyfile(source_train_split_file, dst_train_split_file)
+
+    source_val_split_file = os.path.join(path_to_splines, "val_split.txt")
+    dst_val_split_file = os.path.join(output_path, "val_split.txt")
+    shutil.copyfile(source_val_split_file, dst_val_split_file)
