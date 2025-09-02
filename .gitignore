@@ -3,3 +3,5 @@ out*/**
 data
 runs/
 models/
+results_and_stats_to_save/*
+runs/*
