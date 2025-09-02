@@ -38,8 +38,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from experiments.diffusion_splines import IMUDenoiser
-from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from experiments.fgo_nn_splines import run_validation,process_one_graph
+from experiments.utils_metrics import save_file_split
 
 class DiffussionNN(nn.Module):
     def __init__(self):
@@ -116,10 +116,10 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
     path_to_splines =  './out/splines_fixed'
 
-    # number_of_splines = 20
-    # if not os.path.exists(path_to_splines):
-    #     number_of_control_nodes = 10
-    #     generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
+    number_of_splines = 20
+    if not os.path.exists(path_to_splines):
+        number_of_control_nodes = 10
+        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
         
     window_size=100
     step_size=10
@@ -138,9 +138,12 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
                                 window=window_size,
                                 subseq_len=89,
                                 mode='regression',
-                                enable_noise= not True)
+                                enable_noise= not True,
+                                is_val=True)
 
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+
+    save_file_split(path_to_splines, output_path)
     
     dt = step_size/sampling_rate
     rmse_errors = []
