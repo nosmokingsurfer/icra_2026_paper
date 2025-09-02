@@ -5,6 +5,8 @@ import os
 import shutil
 from matplotlib.backend_bases import MouseButton
 
+from spline_dataset.data_split_generation import generate_data_split
+
 np.random.seed(42)
 
 def bspline(cv, n=100, degree=4, periodic=False):
@@ -64,11 +66,13 @@ def on_click(event):
     fig.canvas.draw()
 
 
-def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=100, n_pts_spline_segment=100):
+def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=100, n_pts_spline_segment=100, val_ratio=0.2, is_random=False):
     """Generate number_of_splines random splines and save them to files."""
     if os.path.exists(out_path):
         shutil.rmtree(out_path)
     os.makedirs(out_path)
+    splines_output_path = f'{out_path}/splines'
+    os.makedirs(splines_output_path)
 
     for b in range(number_of_splines):
         rnd_pts = np.random.uniform(-5, 5, size=(n_control_points, 2))
@@ -76,8 +80,9 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
 
         spline_points = bspline(rnd_pts, n_control_points * n_pts_spline_segment, 3)
         plt.plot(spline_points[:, 0], spline_points[:, 1], marker='o', markersize=0.5)
-        np.savetxt(f'{out_path}/spline_{b}.txt', spline_points)
+        np.savetxt(f'{splines_output_path}/spline_{b}.txt', spline_points)
 
+    generate_data_split(out_path, val_ratio, is_random)
     plt.grid()
     plt.title('Generated batch of trajectories')
     plt.axis('equal')
