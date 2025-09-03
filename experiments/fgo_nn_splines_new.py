@@ -46,7 +46,6 @@ import matplotlib.pyplot as plt
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from fgo.fgo_implementation import process_one_graph, integrate_pred_vel, populate_graph
-from metric import compute_ate_rte, save_file_split
 
 def run_validation(epoch, output_path, model, dataset, num_traj, device):
     model.eval()
@@ -103,8 +102,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device):
         pickle.dump(result, open(output_path / f'idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len = 3, 
-                          n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,
-                          tensorboard_dir=None):
+                          n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,):
     '''
     Odometry model training pipeline on spline dataset
     if subseq_len == 1 - conventional window-based training mode
@@ -141,7 +139,7 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
     criterion = nn.MSELoss()
 
     step_size=10
-    dt = step_size/train_dataloader.sampling_rate
+    dt = step_size/train_dataloader.dataset.sampling_rate
     rmse_errors = []
     chi2_errors = []
     learning_rates = []
@@ -149,10 +147,8 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
-    if not tensorboard_dir:
-        tensorboard_dir = "./default_tensorboard_dir"
 
-    writer = SummaryWriter(tensorboard_dir)
+    writer = SummaryWriter(output_path)
     
     for epoch in range(n_epochs):
 
@@ -221,10 +217,10 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
         writer.add_scalar("rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
         writer.add_scalar("learning_rates", learning_rates[-1], results['n_actual_epochs'])
 
-        pickle.dump(results, open(output_path+'results.pkl','wb'))
+        pickle.dump(results, open(output_path / 'results.pkl','wb'))
 
         if epoch % 10 == 0:
-            torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
+            torch.save(model, output_path / f'model_epoch_{epoch}.cpt')
 
 
 
@@ -233,12 +229,13 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
 
 if __name__ == "__main__":
     subseq_len=2
-    n_epochs=5
+    n_epochs=30
     output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_testing_subseq_length/"
     path_to_splines = "./out/splines"
     window_size=100
 
-
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     train_dataset = Spline_2D_Dataset(path_to_splines, 
                                 window=window_size,
