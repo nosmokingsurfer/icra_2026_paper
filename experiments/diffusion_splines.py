@@ -136,7 +136,7 @@ def train_diffusion_model(config):
         enable_noise=True,
         noise_level=config['noise_level'],
         sampling_rate=config['sampling_rate'],
-        is_val=True
+        stage="val"
     )
 
     val_dataloader = DataLoader(
@@ -368,7 +368,7 @@ if __name__ == "__main__":
         enable_noise=True,
         noise_level=config['noise_level'],
         sampling_rate=config['sampling_rate'],
-        is_val=True
+        stage="val"
     )
     
 

@@ -90,21 +90,22 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
 
 
 if __name__ == "__main__":
-    output_dir = 'out/spline_dataset'
-    fig, ax = plt.subplots()
-    control_points = np.empty((0, 2))
-    spline_points = np.empty((0, 2))
+    generate_batch_of_splines("./out/splines", number_of_splines=10, n_control_points=100, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
+    # output_dir = 'out/spline_dataset'
+    # fig, ax = plt.subplots()
+    # control_points = np.empty((0, 2))
+    # spline_points = np.empty((0, 2))
 
-    control = ax.plot([], [], 'x', color='black', label='control points')
-    spline = ax.plot([], [], label='spline', color='red')
+    # control = ax.plot([], [], 'x', color='black', label='control points')
+    # spline = ax.plot([], [], label='spline', color='red')
 
-    ax.axis('equal')
-    ax.set_xlim(-10, 10)
-    ax.set_ylim(-10, 10)
-    plt.grid()
-    plt.legend()
+    # ax.axis('equal')
+    # ax.set_xlim(-10, 10)
+    # ax.set_ylim(-10, 10)
+    # plt.grid()
+    # plt.legend()
 
-    plt.connect('motion_notify_event', on_move)
-    plt.connect('button_press_event', on_click)
-    plt.connect('close_event', lambda event: on_close(output_dir))
-    plt.show()
+    # plt.connect('motion_notify_event', on_move)
+    # plt.connect('button_press_event', on_click)
+    # plt.connect('close_event', lambda event: on_close(output_dir))
+    # plt.show()

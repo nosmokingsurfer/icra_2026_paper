@@ -139,7 +139,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
                                 subseq_len=89,
                                 mode='regression',
                                 enable_noise= not True,
-                                is_val=True)
+                                stage="val")
 
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
