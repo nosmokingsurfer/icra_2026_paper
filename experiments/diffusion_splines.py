@@ -322,6 +322,8 @@ def demonstrate_denoising(trained_model, diffusion, dataset, device):
     #TODO show the integrated velocity and trajectory - clean, noisy and denoised
     plt.show()
 
+    return mse_noisy, mse_denoised
+
 
 
 
@@ -329,15 +331,14 @@ if __name__ == "__main__":
     # Configuration
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = {
-        'spline_path': './out/splines',  # or path to your spline files
-        
+        'spline_path': './splines_for_experiment',  # or path to your spline files
         'window': 200,
         'noise_level': 0.2,
         'stride' : 20,
         'sampling_rate': 100.0,
-        'batch_size': 64,
-        'num_workers': 0,
-        'num_epochs': 3,
+        'batch_size': 512,
+        'num_workers': 4,
+        'num_epochs': 50,
         'val_interval': 5,
         'T': 1000,  # diffusion timesteps
         'lr': 1e-4,
@@ -372,6 +373,14 @@ if __name__ == "__main__":
     )
     
 
+    best_denoised = 100
+    best_step=-1
     for T in range(1,30):
     # Demonstrate on a sample
-        demonstrate_denoising(trained_model, DiffusionProcess(T), dataset, device)
+        mse_noisy, mse_denoised = demonstrate_denoising(trained_model, DiffusionProcess(T), dataset, device)
+
+        if mse_denoised < best_denoised:
+            best_denoised = mse_denoised
+            best_step = T
+
+    print(best_step, best_denoised)
