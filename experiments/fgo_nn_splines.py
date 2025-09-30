@@ -182,7 +182,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device):
         plt.tight_layout()
         plt.savefig(trajectories_path / f'idx_{i}_epoch_{epoch}.jpg')
         plt.close('all')
-        pickle.dump(result, open(output_path / f'idx_{i}_epoch_{epoch}_traj.pkl','wb'))
+        pickle.dump(result, open(trajectories_path / f'idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len = 3, 
                           n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,):
@@ -230,8 +230,9 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
-
-    writer = SummaryWriter(output_path)
+    tensorboard_path = os.path.join(output_path, "tensorboard")
+    os.makedirs(tensorboard_path, exist_ok=True)
+    writer = SummaryWriter(tensorboard_path)
     
     for epoch in range(n_epochs):
 
@@ -300,7 +301,7 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
         writer.add_scalar("rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
         writer.add_scalar("learning_rates", learning_rates[-1], results['n_actual_epochs'])
 
-        pickle.dump(results, open(output_path / "trajectories" / 'results.pkl','wb'))
+        pickle.dump(results, open(output_path / 'results.pkl','wb'))
 
         if epoch % 10 == 0:
             torch.save(model, output_path / f'model_epoch_{epoch}.cpt')
@@ -312,11 +313,11 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
 
 if __name__ == "__main__":
     subseq_len=2
-    n_epochs=31
-    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_testing_subseq_length/"
-    path_to_splines = "./out/splines"
+    print("subseq_len: ", subseq_len)
+    n_epochs=100
+    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_noisy_input/"
+    path_to_splines = "./splines_for_experiment"
     window_size=100
-
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -327,11 +328,10 @@ if __name__ == "__main__":
                                 mode='regression',
                                 enable_noise= not True)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=train_dataset.get_collate_fn())
+    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
 
-    # There was subseq_len equal to 90. Why?
-    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=subseq_len, enable_noise= not True, stage="val")
-    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn())
+    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
+    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn() )
 
     save_file_split(path_to_splines, output_path)
 
