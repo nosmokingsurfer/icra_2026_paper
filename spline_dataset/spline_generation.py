@@ -90,7 +90,7 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
 
 
 if __name__ == "__main__":
-    generate_batch_of_splines("./out/splines", number_of_splines=10, n_control_points=100, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
+    generate_batch_of_splines("./splines_for_experiment", number_of_splines=50, n_control_points=10, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
     # output_dir = 'out/spline_dataset'
     # fig, ax = plt.subplots()
     # control_points = np.empty((0, 2))
