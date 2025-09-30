@@ -40,6 +40,7 @@ from torch.utils.data import DataLoader
 from experiments.diffusion_splines import IMUDenoiser
 from experiments.fgo_nn_splines import run_validation,process_one_graph
 from experiments.utils_metrics import save_file_split
+from torch.utils.tensorboard import SummaryWriter
 
 class DiffussionNN(nn.Module):
     def __init__(self):
@@ -105,6 +106,9 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
 
+    tensorboard_path = os.path.join(output_path, "tensorboard")
+    os.makedirs(tensorboard_path, exist_ok=True)
+    writer = SummaryWriter(tensorboard_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DiffussionNN().to(device)
     
@@ -114,7 +118,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
     criterion = nn.MSELoss()
 
-    path_to_splines =  './out/splines_fixed'
+    path_to_splines =  './splines_for_experiment'
 
     number_of_splines = 20
     if not os.path.exists(path_to_splines):
@@ -156,7 +160,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     for epoch in range(n_epochs):
 
         # running validation every epoch
-        run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, model.device)
+        run_validation(epoch, Path(output_path), model, val_dataloader.dataset, trajectories_to_save, model.device)
             
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
@@ -219,6 +223,10 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
         results['chi2_errors'] = chi2_errors
         results['rmse_errors'] = rmse_errors
         results['learning_rate'] = learning_rates
+
+        writer.add_scalar("chi2_errors", chi2_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("learning_rates", learning_rates[-1], results['n_actual_epochs'])
         pickle.dump(results, open(output_path+'results.pkl','wb'))
 
         if epoch % 10 == 0:
