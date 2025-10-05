@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 
 from spline_dataset.spline_dataloader import Spline_2D_Dataset
+from experiments.utils_metrics import save_file_split
 
 # Define the UNet model for IMU denoising
 class IMUDenoiser(nn.Module):
@@ -85,11 +86,11 @@ class IMUDenoiser(nn.Module):
 class DiffusionProcess:
     def __init__(self, T=1000, beta_start=1e-4, beta_end=0.02):
         self.T = T
-        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Linear noise schedule
-        self.betas = torch.linspace(beta_start, beta_end, T)
+        self.betas = torch.linspace(beta_start, beta_end, T).to(device)
         self.alphas = 1. - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0).to(device)
         
     def forward_diffusion(self, x0, t):
         """Apply noise to clean data at timestep t"""
@@ -127,6 +128,25 @@ def train_diffusion_model(config):
         collate_fn=dataset.get_collate_fn(),
         num_workers=config['num_workers']
     )
+
+    val_dataset = Spline_2D_Dataset(
+        spline_path=config['spline_path'],
+        window=config['window'],
+        mode='both',
+        enable_noise=True,
+        noise_level=config['noise_level'],
+        sampling_rate=config['sampling_rate'],
+        stage="val"
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
+        collate_fn=dataset.get_collate_fn(),
+        num_workers=config['num_workers']
+    )
+    save_file_split(config['spline_path'], config["diffusion_training_artifacts"])
     
     # Initialize model and diffusion process
     model = IMUDenoiser(
@@ -188,7 +208,7 @@ def train_diffusion_model(config):
             val_losses = []
             
             with torch.no_grad():
-                for val_batch in dataloader:
+                for val_batch in val_dataloader:
                     clean = val_batch['clean_imu'].to(device)
                     noisy = val_batch['noisy_imu'].to(device)
                     
@@ -213,6 +233,13 @@ def train_diffusion_model(config):
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': avg_val_loss,
                 }, f"best_model_{timestamp}.pt")
+
+    path_to_artifact_weights = os.path.join(config["diffusion_training_artifacts"], f"last_model_{timestamp}.pt")
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, path_to_artifact_weights)
     
     writer.close()
     return model
@@ -295,37 +322,40 @@ def demonstrate_denoising(trained_model, diffusion, dataset, device):
     #TODO show the integrated velocity and trajectory - clean, noisy and denoised
     plt.show()
 
+    return mse_noisy, mse_denoised
+
 
 
 
 if __name__ == "__main__":
     # Configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = {
-        'spline_path': './out/splines',  # or path to your spline files
-        
+        'spline_path': './splines_for_experiment',  # or path to your spline files
         'window': 200,
         'noise_level': 0.2,
         'stride' : 20,
         'sampling_rate': 100.0,
-        'batch_size': 64,
-        'num_workers': 0,
-        'num_epochs': 100,
+        'batch_size': 512,
+        'num_workers': 4,
+        'num_epochs': 50,
         'val_interval': 5,
         'T': 1000,  # diffusion timesteps
         'lr': 1e-4,
+        'diffusion_training_artifacts': "./out/diffusion"
     }
-
-    if not  os.path.exists('model.pt'):
+    os.makedirs(config["diffusion_training_artifacts"], exist_ok=True)
+    if not os.path.exists('model.pt'):
         # Train the model
         trained_model = train_diffusion_model(config)
         torch.save(trained_model.state_dict(),'model.pt')
 
     else:
-        trained_model_state = torch.load(open('model.pt','rb'),'cpu')
+        trained_model_state = torch.load(open('model.pt','rb'),device)
         trained_model = IMUDenoiser(
             input_channels=3,  # ax, ay, ωz
             window=config['window']
-        ).to('cpu')
+        ).to(device)
 
         trained_model.load_state_dict(trained_model_state)
 
@@ -338,10 +368,19 @@ if __name__ == "__main__":
         mode='both',
         enable_noise=True,
         noise_level=config['noise_level'],
-        sampling_rate=config['sampling_rate']
+        sampling_rate=config['sampling_rate'],
+        stage="val"
     )
-    device='cpu'
+    
 
+    best_denoised = 100
+    best_step=-1
     for T in range(1,30):
     # Demonstrate on a sample
-        demonstrate_denoising(trained_model, DiffusionProcess(T), dataset, device)
+        mse_noisy, mse_denoised = demonstrate_denoising(trained_model, DiffusionProcess(T), dataset, device)
+
+        if mse_denoised < best_denoised:
+            best_denoised = mse_denoised
+            best_step = T
+
+    print(best_step, best_denoised)

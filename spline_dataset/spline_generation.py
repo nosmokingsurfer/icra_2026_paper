@@ -5,6 +5,10 @@ import os
 import shutil
 from matplotlib.backend_bases import MouseButton
 
+from spline_dataset.data_split_generation import generate_data_split
+
+np.random.seed(42)
+
 def bspline(cv, n=100, degree=4, periodic=False):
     """Calculate n samples on a bspline."""
     cv = np.asarray(cv)
@@ -62,11 +66,13 @@ def on_click(event):
     fig.canvas.draw()
 
 
-def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=100, n_pts_spline_segment=100):
+def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=100, n_pts_spline_segment=100, val_ratio=0.2, is_random=False):
     """Generate number_of_splines random splines and save them to files."""
     if os.path.exists(out_path):
         shutil.rmtree(out_path)
     os.makedirs(out_path)
+    splines_output_path = f'{out_path}/splines'
+    os.makedirs(splines_output_path)
 
     for b in range(number_of_splines):
         rnd_pts = np.random.uniform(-5, 5, size=(n_control_points, 2))
@@ -74,8 +80,9 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
 
         spline_points = bspline(rnd_pts, n_control_points * n_pts_spline_segment, 3)
         plt.plot(spline_points[:, 0], spline_points[:, 1], marker='o', markersize=0.5)
-        np.savetxt(f'{out_path}/spline_{b}.txt', spline_points)
+        np.savetxt(f'{splines_output_path}/spline_{b}.txt', spline_points)
 
+    generate_data_split(out_path, val_ratio, is_random)
     plt.grid()
     plt.title('Generated batch of trajectories')
     plt.axis('equal')
@@ -83,21 +90,22 @@ def generate_batch_of_splines(out_path, number_of_splines=10, n_control_points=1
 
 
 if __name__ == "__main__":
-    output_dir = 'out/spline_dataset'
-    fig, ax = plt.subplots()
-    control_points = np.empty((0, 2))
-    spline_points = np.empty((0, 2))
+    generate_batch_of_splines("./splines_for_experiment", number_of_splines=50, n_control_points=10, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
+    # output_dir = 'out/spline_dataset'
+    # fig, ax = plt.subplots()
+    # control_points = np.empty((0, 2))
+    # spline_points = np.empty((0, 2))
 
-    control = ax.plot([], [], 'x', color='black', label='control points')
-    spline = ax.plot([], [], label='spline', color='red')
+    # control = ax.plot([], [], 'x', color='black', label='control points')
+    # spline = ax.plot([], [], label='spline', color='red')
 
-    ax.axis('equal')
-    ax.set_xlim(-10, 10)
-    ax.set_ylim(-10, 10)
-    plt.grid()
-    plt.legend()
+    # ax.axis('equal')
+    # ax.set_xlim(-10, 10)
+    # ax.set_ylim(-10, 10)
+    # plt.grid()
+    # plt.legend()
 
-    plt.connect('motion_notify_event', on_move)
-    plt.connect('button_press_event', on_click)
-    plt.connect('close_event', lambda event: on_close(output_dir))
-    plt.show()
+    # plt.connect('motion_notify_event', on_move)
+    # plt.connect('button_press_event', on_click)
+    # plt.connect('close_event', lambda event: on_close(output_dir))
+    # plt.show()

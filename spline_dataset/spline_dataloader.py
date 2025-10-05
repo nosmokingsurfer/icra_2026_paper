@@ -1,11 +1,8 @@
-# from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
 import numpy as np
 
 from spline_dataset.spline_generation import generate_batch_of_splines
-
 from spline_dataset.spline_diff import generate_imu_data
-# from spline_generation import generate_batch_of_splines
 
 import glob
 from tqdm import tqdm
@@ -87,7 +84,7 @@ class Spline_2D_Dataset(Dataset):
             enable_noise (bool, optional): IMU noise injection. Defaults to False.
             mode (string, optional): Prepare subsequences for "regression", denoising "diffusion" or "both". Default is regression.
         """
-    def __init__(self, spline_path, window = 100, step = 10, stride=10, sampling_rate=100, subseq_len = 1, mode='regression', enable_noise = False, noise_level = 0.2):
+    def __init__(self, spline_path, window = 100, step = 10, stride=10, sampling_rate=100, subseq_len = 1, mode='regression', enable_noise = False, noise_level = 0.2, stage = "train"):
         self.spline_path = spline_path
         self.window = window
         self.input_dim = 3
@@ -118,8 +115,24 @@ class Spline_2D_Dataset(Dataset):
         self.all_velocities = []
         self.all_gt_poses = []
 
-        self.paths = glob.glob(f'{spline_path}/spline_*.txt')
-        print(f"Found {len(self.paths)} splines in path: {spline_path}")
+        self.all_acc = []
+        self.all_gyro = []
+        self.all_tau = []
+
+
+        if stage == "val":
+            path_to_split_file = f"{spline_path}/val_split.txt"
+        elif stage == "train":
+            path_to_split_file = f"{spline_path}/train_split.txt"
+        else:
+            raise RuntimeError("Selected stage is not supported")
+
+        with open(path_to_split_file, "r") as split_file:
+            files_to_read = split_file.readlines()
+        
+        self.paths = [os.path.join(spline_path, "splines", current_spline_name.strip()) for current_spline_name in files_to_read]
+        print(f"Found {len(self.paths)} splines in path: {spline_path} for {stage}")
+
 
         # iterating over all files with spline points and computing subsequence indexes
         for exp_id, path in enumerate(self.paths):
@@ -238,19 +251,20 @@ if __name__ == "__main__":
 
     if not os.path.exists(output_path):
         os.makedirs(output_path,exist_ok=True)
-    path_to_splines = output_path + 'splines/'
+    path_to_splines = output_path + 'splines'
 
     number_of_splines = 10
-    if not os.path.exists(path_to_splines):
-        number_of_control_nodes = 10
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
+    # if not os.path.exists(path_to_splines):
+    number_of_control_nodes = 10
+    generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
 
     dataset = Spline_2D_Dataset(path_to_splines, window=100, subseq_len=5, enable_noise= not True)
+    dataset = Spline_2D_Dataset(path_to_splines, window=100, subseq_len=5, enable_noise= not True, stage="val")
 
-    print(f"{dataset.__len__()=}")
-    print(f"{dataset.__getitem__(0)=}")
+    # print(f"{dataset.__len__()=}")
+    # print(f"{dataset.__getitem__(0)=}")
 
-    N = len(dataset)
+    # N = len(dataset)
 
-    for i in range(N):
-        print(dataset.__getitem__(i))
+    # for i in range(N):
+    #     print(dataset.__getitem__(i))
