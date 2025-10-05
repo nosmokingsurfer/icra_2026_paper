@@ -3,3 +3,4 @@ out*/**
 data
 runs/
 models/
+splines_for_experiment/*
