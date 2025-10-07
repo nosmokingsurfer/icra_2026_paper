@@ -11,7 +11,7 @@ import os
 import sys
 import pickle
 from tqdm import tqdm
-from pathlib import Path
+import shutil
 
 
 import torch
@@ -22,21 +22,29 @@ from torch.multiprocessing import Pool
 from spline_dataset.spline_generation import generate_batch_of_splines
 from spline_dataset.spline_dataloader import Spline_2D_Dataset, convert_to_se3
 
-from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
+from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte, save_file_split
 
 from metric import compute_ate_rte
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
 
-def compute_delta_x(gt_poses, estimated_poses):
-    gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
-    estimated_poses_se3 = [mrob.SE3(estimated_poses[j]) for j in range(len(estimated_poses))]
-    
-    result_Ln = [(gt_poses_se3[k] * estimated_poses_se3[k].inv()).Ln() for k in range(len(gt_poses_se3))]
-    return np.array(result_Ln)
+from pathlib import Path
+import torch
+import torch.optim as optim
+import torch.nn as nn
+from spline_dataset.spline_dataloader import Spline_2D_Dataset
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torch.multiprocessing import Pool
+import numpy as np
+np.set_printoptions(precision=4,linewidth=180)
+import pickle
+from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
-
+from ronin_resnet import get_model
+from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 def integrate_pred_vel(pred_vel, gt_poses, gt_pose0, dt=0.01):
     T = pred_vel.shape[0]
     poses = torch.zeros((T, 3), dtype=pred_vel.dtype, device=pred_vel.device)
@@ -55,6 +63,12 @@ def integrate_pred_vel(pred_vel, gt_poses, gt_pose0, dt=0.01):
 
     return poses
 
+def compute_delta_x(gt_poses, estimated_poses):
+    gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
+    estimated_poses_se3 = [mrob.SE3(estimated_poses[j]) for j in range(len(estimated_poses))]
+    
+    result_Ln = [(gt_poses_se3[k] * estimated_poses_se3[k].inv()).Ln() for k in range(len(gt_poses_se3))]
+    return np.array(result_Ln)
 
 def populate_graph(pred_poses, gt_poses):
     graph = mrob.FGraphDiff()
@@ -89,46 +103,6 @@ def populate_graph(pred_poses, gt_poses):
     
     return graph
 
-
-def print_2d_graph(graph, gt_poses):
-    x = np.array(graph.get_estimated_state())
-    
-    fig = plt.figure()
-
-    plt.plot(x[:,0,3],x[:,1,3], '-b', marker='o', label='estimated')
-    plt.plot(gt_poses[:, :2][:, 0], gt_poses[:, :2][:, 1], label='GT', color='red')
-    plt.title("2D Pose Graph")
-
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.legend()
-    plt.axis('equal')
-    plt.grid()
-    # plt.show()
-    return fig
-
-
-def make_gif_from_figures(folder_path, output_path="graph_evolution.gif", num_epochs=100, duration=0.3):
-    file_list = sorted(
-        [f for f in os.listdir(folder_path) if f.startswith("poses_") and f.endswith(".png") ],
-        key=lambda x: int(''.join(filter(str.isdigit, x)))
-    )
-    
-    file_list = file_list[0:num_epochs]
-
-    images = [imageio.imread(os.path.join(folder_path, fname)) for fname in file_list]
-    imageio.mimsave(output_path, images, duration=duration)
-    print(f"GIF saved to {output_path}")
-
-
-def plot_integrated_vel(poses_1, poses_2):
-    plt.figure()
-    plt.plot(poses_1[:, 0].detach(), poses_1[:, 1].detach(), marker='o', label='integrated')
-    plt.plot(poses_2[:, 0].detach(), poses_2[:, 1].detach(), marker='o', label='gt')
-    plt.legend()
-    plt.show()
-    return
-
 def process_one_graph(vel_pred, gt_pose_seq, dt):
     S = vel_pred.shape[0]
     # Step 1: integrate vel_pred[b] into poses
@@ -155,22 +129,23 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     
     return grad_final, chi2, rmse
 
-def run_validation(epoch, output_path, model, dataset, num_traj):
+
+def run_validation(epoch, output_path, model, dataset, num_traj, device):
     model.eval()
 
     assert num_traj <= len(dataset)
 
-    if not os.path.exists(output_path):
-        os.makedirs(output_path,exist_ok=True)
 
     for i in range(num_traj):
         result = {}
 
         sample  = dataset.__getitem__(i)
         imu_seq = sample['noisy_imu'].to(device)
-        vel_seq = sample['gt_vel']
         gt_poses_seq = sample['gt_poses']
         dt = dataset.step/dataset.sampling_rate
+
+        trajectories_path = output_path / "trajectories"
+        trajectories_path.mkdir(parents=True, exist_ok=True)
 
         S, C, W = imu_seq.shape
         vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(S, -1).detach().cpu()
@@ -205,13 +180,12 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         plt.title(f'Epoch: {epoch}\n' + \
             f"ATE: {ate:.3f}, RTE: {rte:.3f}")
         plt.tight_layout()
-        plt.savefig(f'{output_path}idx_{i}_epoch_{epoch}.jpg')
+        plt.savefig(trajectories_path / f'idx_{i}_epoch_{epoch}.jpg')
         plt.close('all')
-        pickle.dump(result, open(f'{output_path}idx_{i}_epoch_{epoch}_traj.pkl','wb'))
+        pickle.dump(result, open(trajectories_path / f'idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
-
-
-def run_spline_experiment(subseq_len = 3, n_epochs=300):
+def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len = 3, 
+                          n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,):
     '''
     Odometry model training pipeline on spline dataset
     if subseq_len == 1 - conventional window-based training mode
@@ -223,10 +197,11 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     results['n_actual_epochs'] = 0
     results['subseq_len'] = subseq_len
 
-    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}/"
-    if not os.path.exists(output_path):
-        os.makedirs(output_path, exist_ok=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    device = torch.device(device)
+
     model = ResNet1D(
         num_inputs=3,       
         num_outputs=2,         
@@ -241,41 +216,13 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
         trans_planes=128
     ).to(device)
 
-    # model.load_state_dict(torch.load("out/model_fgo.pth"))
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=start_lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
 
     criterion = nn.MSELoss()
 
-    path_to_splines =  './out/splines'
-
-    number_of_splines = 20
-    if not os.path.exists(path_to_splines):
-        number_of_control_nodes = 10
-        generate_batch_of_splines(path_to_splines, number_of_splines, number_of_control_nodes, 100)
-        
-    window_size=100
     step_size=10
-    sampling_rate =100
-    
-    dataset = Spline_2D_Dataset(path_to_splines, 
-                                window=window_size,
-                                sampling_rate=100,
-                                subseq_len=subseq_len,
-                                mode='regression',
-                                enable_noise= not True)
-
-    train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True, collate_fn=dataset.get_collate_fn())
-
-    val_dataset = Spline_2D_Dataset(path_to_splines,
-                                window=window_size,
-                                subseq_len=89,
-                                mode='regression',
-                                enable_noise= not True)
-
-    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-    
-    dt = step_size/sampling_rate
+    dt = step_size/train_dataloader.dataset.sampling_rate
     rmse_errors = []
     chi2_errors = []
     learning_rates = []
@@ -283,15 +230,18 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
+    tensorboard_path = os.path.join(output_path, "tensorboard")
+    os.makedirs(tensorboard_path, exist_ok=True)
+    writer = SummaryWriter(tensorboard_path)
+    
     for epoch in range(n_epochs):
 
         # running validation every epoch
-        run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, device)
+        if val_dataloader:
+            run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, device)
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
-        
         for sample in tqdm(train_dataloader, position=0, leave=True):
-            # sample  = dataset.__getitem__(i)
             imu_seq = sample['noisy_imu'].to(device)
             vel_seq = sample['gt_vel'].to(device)
             gt_poses_seq = sample['gt_poses']
@@ -306,7 +256,6 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
             vel_pred = model(imu_seq.reshape(-1, C, W)).reshape(B, S, -1)
             
             optimizer.zero_grad()
-
 
             if subseq_len > 1:
                 all_grads = [None for _ in range(B)]
@@ -325,9 +274,8 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
                 grad_tensor = torch.stack(all_grads).to(device)  # [B, S, 2]
                 vel_pred.backward(gradient= - grad_tensor)
-
             else:
-                loss = torch.linalg.norm(vel_pred - vel_seq)
+                loss = criterion(vel_pred, vel_seq)
                 loss.backward()
 
                 total_rmse += loss.detach().cpu().item()
@@ -336,7 +284,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             optimizer.step()
         scheduler.step()
-        
+
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
         learning_rates.append(scheduler.get_last_lr()[0])
@@ -348,32 +296,45 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
         results['chi2_errors'] = chi2_errors
         results['rmse_errors'] = rmse_errors
         results['learning_rate'] = learning_rates
-        pickle.dump(results, open(output_path+'results.pkl','wb'))
+
+        writer.add_scalar("chi2_errors", chi2_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("learning_rates", learning_rates[-1], results['n_actual_epochs'])
+
+        pickle.dump(results, open(output_path / 'results.pkl','wb'))
 
         if epoch % 10 == 0:
-            torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
+            torch.save(model, output_path / f'model_epoch_{epoch}.cpt')
 
-    plt.title('Errors: CHi2 and RMSE')
-    plt.plot(chi2_errors,label='chi2')
-    plt.plot(rmse_errors,label='rmse')
-    plt.xlabel('epoch')
-    plt.grid()
-    plt.legend()
-    plt.savefig(f'{output_path}/errors.png')
-    plt.close('all')
 
-    plt.figure()
-    plt.plot(learning_rates,label='learning rate')
-    plt.grid()
-    plt.xlabel('epoch')
-    plt.legend()
-    plt.savefig(f'{output_path}/learning_rate.png')
-    plt.close('all')
+
+
+
 
 if __name__ == "__main__":
+    subseq_len=2
+    print("subseq_len: ", subseq_len)
+    n_epochs=100
+    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_noisy_input/"
+    path_to_splines = "./splines_for_experiment"
+    window_size=100
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-    # for s in range(1,5,1):
-    #     run_spline_experiment(s, 50)
+    train_dataset = Spline_2D_Dataset(path_to_splines, 
+                                window=window_size,
+                                sampling_rate=100,
+                                subseq_len=subseq_len,
+                                mode='regression',
+                                enable_noise= not True)
 
-    run_spline_experiment(1, 100)
-    run_spline_experiment(6, 100)
+    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
+
+    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
+    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn() )
+
+    save_file_split(path_to_splines, output_path)
+
+    device = torch.device('cuda:0' if torch.cuda.is_available()  else 'cpu')
+    fgo_nn_splines_train_loop(train_dataloader, val_dataloader=val_dataloader, subseq_len = subseq_len, 
+                          n_epochs=n_epochs, output_path=output_path, device=device, start_lr=1e-3)
