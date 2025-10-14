@@ -200,7 +200,7 @@ class Spline_2D_Dataset(Dataset):
 
             clean_imu_seq[local_idx] = np.hstack((self.all_acc[exp_id][subseq_range],self.all_gyro[exp_id][subseq_range]))
             noisy_imu_seq[local_idx] = np.hstack((self.all_noisy_acc[exp_id][subseq_range],self.all_noisy_gyro[exp_id][subseq_range]))
-            gt_vel_seq[local_idx] = self.all_velocities[exp_id][subseq_range].mean(axis=0)
+            gt_vel_seq[local_idx] = self.all_velocities[exp_id][subseq_range][0]
             gt_poses_seq[local_idx] = self.all_gt_poses[exp_id][subseq_range][-1]
 
         clean_imu_seq = torch.tensor(clean_imu_seq, dtype=torch.float32).permute(0, 2, 1)    # [S, 3, window]
