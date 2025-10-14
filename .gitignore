@@ -4,3 +4,4 @@ data
 runs/
 models/
 splines_for_experiment/*
+splines_for_experiment_*_controls/*
