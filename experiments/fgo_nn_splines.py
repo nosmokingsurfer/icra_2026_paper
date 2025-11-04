@@ -130,16 +130,17 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     return grad_final, chi2, rmse
 
 
-def run_validation(epoch, output_path, model, dataset, num_traj, device):
+def run_validation(epoch, output_path, model, dataset, num_traj, device, writer):
     model.eval()
 
     assert num_traj <= len(dataset)
 
 
-    for i in range(num_traj):
+    ate_errors, rte_errors = [], []
+    for idx, sample in enumerate(dataset):
         result = {}
 
-        sample  = dataset.__getitem__(i)
+        sample  = dataset.__getitem__(idx)
         imu_seq = sample['noisy_imu'].to(device)
         gt_poses_seq = sample['gt_poses']
         dt = dataset.step/dataset.sampling_rate
@@ -155,7 +156,6 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device):
         # print_2d_graph(graph,gt_poses_seq)
         est_pose_seq = np.array(graph.get_estimated_state())
 
-
         result.update({'open_loop_traj' : est_pose_seq, 'gt_traj' : gt_poses_seq.detach().cpu().numpy()})
         
 
@@ -166,25 +166,37 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device):
         result['ate'] = ate
         result['rte'] = rte
 
-        plt.figure(figsize=(8,8))
+        ate_errors.append(ate)
+        rte_errors.append(rte)
 
-        plt.plot(est_pose_seq[:,0,3],est_pose_seq[:,1,3], '-b', marker='o', label='estimated')
-        plt.plot(gt_poses_seq[:, :2][:, 0], gt_poses_seq[:, :2][:, 1], label='GT', color='red')
-        plt.title("2D Pose Graph")
+        if idx <= num_traj:
+            plt.figure(figsize=(8,8))
 
-        plt.xlabel("X")
-        plt.ylabel("Y")
-        plt.legend()
-        plt.axis('equal')
-        plt.grid()
-        plt.title(f'Epoch: {epoch}\n' + \
-            f"ATE: {ate:.3f}, RTE: {rte:.3f}")
-        plt.tight_layout()
-        plt.savefig(trajectories_path / f'idx_{i}_epoch_{epoch}.jpg')
-        plt.close('all')
-        pickle.dump(result, open(trajectories_path / f'idx_{i}_epoch_{epoch}_traj.pkl','wb'))
+            plt.plot(est_pose_seq[:,0,3],est_pose_seq[:,1,3], '-b', marker='o', label='estimated')
+            plt.plot(gt_poses_seq[:, :2][:, 0], gt_poses_seq[:, :2][:, 1], label='GT', color='red')
+            plt.title("2D Pose Graph")
 
-def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len = 3, 
+            plt.xlabel("X")
+            plt.ylabel("Y")
+            plt.legend()
+            plt.axis('equal')
+            plt.grid()
+            plt.title(f'Epoch: {epoch}\n' + \
+                f"ATE: {ate:.3f}, RTE: {rte:.3f}")
+            plt.tight_layout()
+            plt.savefig(trajectories_path / f'idx_{idx}_epoch_{epoch}.jpg')
+            writer.add_figure('trajectories', plt.gcf(), global_step=epoch)
+            plt.close('all')
+            pickle.dump(result, open(trajectories_path / f'idx_{idx}_epoch_{epoch}_traj.pkl','wb'))
+
+    mean_ate = np.mean(ate_errors)
+    mean_rte = np.mean(rte_errors)
+
+    writer.add_scalar('Val/mean_ate', mean_ate, epoch)
+    writer.add_scalar('Val/mean_rte', mean_rte, epoch)
+
+
+def run_fgo_nn_splines_experiment(subseq_len = 3, 
                           n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,):
     '''
     Odometry model training pipeline on spline dataset
@@ -196,12 +208,35 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
     results['n_epochs'] = n_epochs
     results['n_actual_epochs'] = 0
     results['subseq_len'] = subseq_len
+    trajectories_to_save = 3
+    results['num_val_traj'] = trajectories_to_save
 
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device(device)
+    train_dataloader_path = output_path / "train_dataloader.pkl"
+    if train_dataloader_path.exists:
+        print("круто, чё")
+    else:
+        splines_path = output_path / "splines_for_experiment"
+        generate_batch_of_splines(splines_path, number_of_splines=50, n_control_points=10, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
+        train_dataset = Spline_2D_Dataset(path_to_splines, 
+                                    window=window_size,
+                                    sampling_rate=100,
+                                    subseq_len=subseq_len,
+                                    mode='regression',
+                                    enable_noise= not True)
 
+        train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
+
+        val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=subseq_len, enable_noise= not True, stage="val")
+        val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn())
+
+        with open(train_dataloader_path, 'wb') as f:
+            pickle.dump(train_dataloader, f)
+
+        with open(output_path / "val_dataloader.pkl", "wb" ) as f:
+            pickle.dump(val_dataloader, f)
     model = ResNet1D(
         num_inputs=3,       
         num_outputs=2,         
@@ -218,7 +253,6 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
 
     optimizer = optim.Adam(model.parameters(), lr=start_lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
-
     criterion = nn.MSELoss()
 
     step_size=10
@@ -227,8 +261,7 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
     chi2_errors = []
     learning_rates = []
     
-    trajectories_to_save = 3
-    results['num_val_traj'] = trajectories_to_save
+
 
     tensorboard_path = os.path.join(output_path, "tensorboard")
     os.makedirs(tensorboard_path, exist_ok=True)
@@ -238,7 +271,7 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
 
         # running validation every epoch
         if val_dataloader:
-            run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, device)
+            run_validation(epoch, output_path, model, val_dataloader.dataset, trajectories_to_save, device, writer)
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
         for sample in tqdm(train_dataloader, position=0, leave=True):
@@ -297,9 +330,9 @@ def fgo_nn_splines_train_loop(train_dataloader, val_dataloader=None, subseq_len 
         results['rmse_errors'] = rmse_errors
         results['learning_rate'] = learning_rates
 
-        writer.add_scalar("chi2_errors", chi2_errors[-1], results['n_actual_epochs'])
-        writer.add_scalar("rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
-        writer.add_scalar("learning_rates", learning_rates[-1], results['n_actual_epochs'])
+        writer.add_scalar("Train/chi2_errors", chi2_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("Train/rmse_errors", rmse_errors[-1], results['n_actual_epochs'])
+        writer.add_scalar("Train/learning_rates", learning_rates[-1], results['n_actual_epochs'])
 
         pickle.dump(results, open(output_path / 'results.pkl','wb'))
 
@@ -321,17 +354,17 @@ if __name__ == "__main__":
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    train_dataset = Spline_2D_Dataset(path_to_splines, 
-                                window=window_size,
-                                sampling_rate=100,
-                                subseq_len=subseq_len,
-                                mode='regression',
-                                enable_noise= not True)
+    # train_dataset = Spline_2D_Dataset(path_to_splines, 
+    #                             window=window_size,
+    #                             sampling_rate=100,
+    #                             subseq_len=subseq_len,
+    #                             mode='regression',
+    #                             enable_noise= not True)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
+    # train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
 
-    val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
-    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn() )
+    # val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
+    # val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn() )
 
     save_file_split(path_to_splines, output_path)
 
