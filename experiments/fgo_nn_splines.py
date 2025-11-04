@@ -185,7 +185,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device, writer)
                 f"ATE: {ate:.3f}, RTE: {rte:.3f}")
             plt.tight_layout()
             plt.savefig(trajectories_path / f'idx_{idx}_epoch_{epoch}.jpg')
-            writer.add_figure('trajectories', plt.gcf(), global_step=epoch)
+            writer.add_figure(f'idx_{idx}_epoch_{epoch}.jpg', plt.gcf(), global_step=epoch)
             plt.close('all')
             pickle.dump(result, open(trajectories_path / f'idx_{idx}_epoch_{epoch}_traj.pkl','wb'))
 
@@ -196,8 +196,7 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device, writer)
     writer.add_scalar('Val/mean_rte', mean_rte, epoch)
 
 
-def run_fgo_nn_splines_experiment(subseq_len = 3, 
-                          n_epochs=300, output_path=None, device="cpu", start_lr=1e-3,):
+def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, output_path=None, device="cpu", start_lr=1e-3):
     '''
     Odometry model training pipeline on spline dataset
     if subseq_len == 1 - conventional window-based training mode
@@ -210,16 +209,20 @@ def run_fgo_nn_splines_experiment(subseq_len = 3,
     results['subseq_len'] = subseq_len
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
+    window_size=100
 
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    train_dataloader_path = output_path / "train_dataloader.pkl"
-    if train_dataloader_path.exists:
-        print("круто, чё")
+    train_dataset_path = output_path / "train_dataset.pkl"
+    if train_dataset_path.is_file():
+        with open(train_dataset_path, 'rb') as f:
+            train_dataset = pickle.load(f)
+        with open(output_path / "val_dataset.pkl", 'rb') as f:
+            val_dataset = pickle.load(f)
     else:
-        splines_path = output_path / "splines_for_experiment"
-        generate_batch_of_splines(splines_path, number_of_splines=50, n_control_points=10, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
+        path_to_splines = output_path / "splines_for_experiment"
+        generate_batch_of_splines(path_to_splines, number_of_splines=50, n_control_points=10, n_pts_spline_segment=100, val_ratio=0.2, is_random=False)
         train_dataset = Spline_2D_Dataset(path_to_splines, 
                                     window=window_size,
                                     sampling_rate=100,
@@ -227,16 +230,19 @@ def run_fgo_nn_splines_experiment(subseq_len = 3,
                                     mode='regression',
                                     enable_noise= not True)
 
-        train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
+        
 
         val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=subseq_len, enable_noise= not True, stage="val")
-        val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn())
+        
 
-        with open(train_dataloader_path, 'wb') as f:
-            pickle.dump(train_dataloader, f)
+        with open(train_dataset_path, 'wb') as f:
+            pickle.dump(train_dataset, f)
 
-        with open(output_path / "val_dataloader.pkl", "wb" ) as f:
-            pickle.dump(val_dataloader, f)
+        with open(output_path / "val_dataset.pkl", "wb" ) as f:
+            pickle.dump(val_dataset, f)
+
+    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn())
+    train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
     model = ResNet1D(
         num_inputs=3,       
         num_outputs=2,         
@@ -347,27 +353,12 @@ def run_fgo_nn_splines_experiment(subseq_len = 3,
 if __name__ == "__main__":
     subseq_len=2
     print("subseq_len: ", subseq_len)
-    n_epochs=100
-    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_noisy_input/"
-    path_to_splines = "./splines_for_experiment"
-    window_size=100
+    n_epochs=1
+    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_testing/"
+
+
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # train_dataset = Spline_2D_Dataset(path_to_splines, 
-    #                             window=window_size,
-    #                             sampling_rate=100,
-    #                             subseq_len=subseq_len,
-    #                             mode='regression',
-    #                             enable_noise= not True)
-
-    # train_dataloader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=train_dataset.get_collate_fn(), num_workers=8 , pin_memory=True)
-
-    # val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
-    # val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=val_dataset.get_collate_fn() )
-
-    save_file_split(path_to_splines, output_path)
-
     device = torch.device('cuda:0' if torch.cuda.is_available()  else 'cpu')
-    fgo_nn_splines_train_loop(train_dataloader, val_dataloader=val_dataloader, subseq_len = subseq_len, 
-                          n_epochs=n_epochs, output_path=output_path, device=device, start_lr=1e-3)
+    run_fgo_nn_splines_experiment(subseq_len = subseq_len, n_epochs=n_epochs, output_path=output_path, device="cpu", start_lr=1e-3)
