@@ -135,12 +135,10 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device, writer)
 
     assert num_traj <= len(dataset)
 
-
     ate_errors, rte_errors = [], []
     for idx, sample in enumerate(dataset):
         result = {}
 
-        sample  = dataset.__getitem__(idx)
         imu_seq = sample['noisy_imu'].to(device)
         gt_poses_seq = sample['gt_poses']
         dt = dataset.step/dataset.sampling_rate
@@ -216,6 +214,7 @@ def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, output_path=None
 
     train_dataset_path = output_path / "train_dataset.pkl"
     if train_dataset_path.is_file():
+        print(f"Find cached datasets here - {output_path}. Loading from cache.")
         with open(train_dataset_path, 'rb') as f:
             train_dataset = pickle.load(f)
         with open(output_path / "val_dataset.pkl", 'rb') as f:
@@ -353,7 +352,7 @@ def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, output_path=None
 if __name__ == "__main__":
     subseq_len=2
     print("subseq_len: ", subseq_len)
-    n_epochs=1
+    n_epochs=10
     output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_testing/"
 
 
