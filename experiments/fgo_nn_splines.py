@@ -194,12 +194,16 @@ def run_validation(epoch, output_path, model, dataset, num_traj, device, writer)
     writer.add_scalar('Val/mean_rte', mean_rte, epoch)
 
 
-def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, output_path=None, device="cpu", start_lr=1e-3):
+def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, root_output_path=None, device="cpu", start_lr=1e-3):
     '''
     Odometry model training pipeline on spline dataset
     if subseq_len == 1 - conventional window-based training mode
     if subseq_len > 1 - FGO loss training mode
     '''
+
+    root_output_path = Path(root_output_path)
+    output_path = root_output_path / f"graphs_seq_{subseq_len}_epochs_{n_epochs}_testing/"
+    output_path.mkdir(parents=True, exist_ok=True)
 
     results = {}
     results['n_epochs'] = n_epochs
@@ -231,7 +235,7 @@ def run_fgo_nn_splines_experiment(subseq_len = 3, n_epochs=300, output_path=None
 
         
 
-        val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=subseq_len, enable_noise= not True, stage="val")
+        val_dataset = Spline_2D_Dataset(path_to_splines, window=window_size, subseq_len=89, enable_noise= not True, stage="val")
         
 
         with open(train_dataset_path, 'wb') as f:
@@ -353,11 +357,7 @@ if __name__ == "__main__":
     subseq_len=2
     print("subseq_len: ", subseq_len)
     n_epochs=10
-    output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}_testing/"
 
-
-    output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
-
+    root_output_path = "./out"
     device = torch.device('cuda:0' if torch.cuda.is_available()  else 'cpu')
-    run_fgo_nn_splines_experiment(subseq_len = subseq_len, n_epochs=n_epochs, output_path=output_path, device="cpu", start_lr=1e-3)
+    run_fgo_nn_splines_experiment(subseq_len = subseq_len, n_epochs=n_epochs, root_output_path=root_output_path, device="cpu", start_lr=1e-3)
