@@ -4,5 +4,6 @@ out*/**
 data
 runs/
 models/
+**/lightning_logs*/*
 splines_for_experiment/*
 splines_for_experiment_*_controls/*

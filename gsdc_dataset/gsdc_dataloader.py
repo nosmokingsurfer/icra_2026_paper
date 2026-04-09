@@ -1,6 +1,8 @@
 from tqdm import tqdm
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -9,70 +11,74 @@ import quaternion
 
 import torch
 from torch.utils.data import Dataset
+from multiprocessing import Pool
 import pymap3d as pm
 import ahrs
 
 class GSDC_dataset(Dataset):
-    def __init__(self, data_path = "./data/smartphone-decimeter-2022/", **args):
+    def __init__(self, mode,  **args):
+        data_path = "./data/smartphone-decimeter-2022/"
         self.dataloader_params = args
         assert "window" in self.dataloader_params
+        assert mode in ['train','val','test']
 
         self.data_path = data_path
-        self.train_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
-        self.test_files = list(Path(data_path + "test/").rglob("**/device_imu.csv"))
-
+        self.mode = mode
+        self.imu_files = list(Path(data_path + f"{self.mode}/").rglob("**/device_imu.csv"))
 
         self.slice_indexes = []
         self.task_data = {}
 
-
-        print("Indexing training tasks...")
-        self.train_tasks = []
-        for t in tqdm(self.train_files):
+        print("Indexing tasks...")
+        self.tasks = []
+        for t in tqdm(self.imu_files):
             sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
             imu_file = str(t.parent / "device_imu.csv")
             gt_file = str(t.parent / "ground_truth.csv")
 
-            self.train_tasks.append(
+            self.tasks.append(
                 {
                     "sample_id" : sample_id,
-                    "mode" : "train",
+                    "mode" : self.mode,
                     "imu_file" : imu_file,
                     "gt_file" : gt_file
                 }
             )
 
-        for t in self.train_tasks:
-            self.generate_combined_data(t)
-            self.rotate_data(t)
-            self.map_indexes(t)
+        # TODO apply white lists
+        # self.tasks = self.tasks[:20]
+
+        print('Preprocessing tasks...')
+        with Pool(6) as p:
+            # generating combined_data
+            res = [p.apply_async(self.generate_combined_data,args=(t,)) for t in self.tasks]
+            for r in tqdm(res):
+                r.get()
+
+            # rotating data
+            res = [p.apply_async(self.rotate_data,args=(t,)) for t in self.tasks]
+            tmp_result = [None]*len(self.tasks)
+            for idx,r in tqdm(enumerate(res),total=len(self.tasks)):
+                tmp_result[idx] = r.get()
+
+            for idx in range(len(self.tasks)):
+                self.task_data[self.tasks[idx]['sample_id']] = tmp_result[idx]
+            
+            # mapping indexes
+            res = [p.apply_async(self.map_indexes,args=(t,)) for t in self.tasks]
+            for r in tqdm(res,total=len(self.tasks)):
+                self.slice_indexes.extend(r.get())
 
         print(len(self.slice_indexes))
-        pass
-
-        # print("Indexing test tasks...")
-        # self.test_tasks = []
-
-        # for t in tqdm(self.test_files):
-        #     sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
-        #     imu_file = str(t.parent / "device_imu.csv")
-
-        #     self.test_tasks.append(
-        #         {
-        #             "sample_id" : sample_id,
-        #             "mode" : "test",
-        #             "imu_file" : imu_file,
-        #             "gt_file" : gt_file
-        #         }
-        #     )
-
-        # print(len(self.test_tasks))
 
     def generate_combined_data(self, task):
         if not os.path.exists('./out_vdr/'):
             os.makedirs('./out_vdr',exist_ok=True)
+        
+        if not os.path.exists(f"./out_vdr/{task['mode']}"):
+            os.makedirs(f"./out_vdr/{task['mode']}",exist_ok=True)
 
-        combined_data_path = './out_vdr/' + task['sample_id'] + "_combined_data.csv"
+        combined_data_path = './out_vdr/' + f"{task['mode']}/"+ task['sample_id'] + "_combined_data.csv"
         if os.path.exists(combined_data_path):
             combined_data = pd.read_csv(combined_data_path,compression='zip')
 
@@ -135,12 +141,12 @@ class GSDC_dataset(Dataset):
     def rotate_data(self,task):
         sample_id = task['sample_id']
 
-        rotated_combined_data_path = './out_vdr/' + task['sample_id'] + "_rotated_combined_data.csv"
+        rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_rotated_combined_data.csv"
         if os.path.exists(rotated_combined_data_path):
             rotate_data = pd.read_csv(rotated_combined_data_path,compression='zip')
 
         else:
-            combined_data_path = './out_vdr/' + task['sample_id'] + "_combined_data.csv"
+            combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_combined_data.csv"
 
             combined_data = pd.read_csv(combined_data_path, compression='zip')
 
@@ -169,11 +175,11 @@ class GSDC_dataset(Dataset):
             # Array with the 4 elements of quaternion of the form [w, x, y, z]
             plt.plot(np.unwrap(quaternion.as_euler_angles(quats_iw),axis=0),label=['yaw','pitch','roll'])
             plt.title('Euler angles from local fixed frame to IMU frame')
-            plt.legend()
             plt.grid()
 
-            plt.plot(combined_data.bearing,'-',color='red', label='bearing from pvt')
-            plt.savefig(f'./out_vdr/{sample_id}_euler_w_to_imu.png')
+            plt.plot(np.unwrap(combined_data.bearing/180*np.pi - np.pi) + np.pi,'-',color='red', label='bearing from pvt')
+            plt.legend()
+            plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_euler_w_to_imu.png')
             plt.close('all')
             # plt.show()
 
@@ -238,16 +244,16 @@ class GSDC_dataset(Dataset):
             plt.plot(v_vehicle,label=['v_vehicle_x', 'v_vehicle_y','v_vehicle_z'])
             plt.title(f"PVT velocity in vehicle frame\nMount angle: {best_yaw_mount}")
             plt.grid()
-            plt.savefig(f'./out_vdr/{sample_id}_pvt_in_vehicle_frame.png')
+            plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_vehicle_frame.png')
             plt.close('all')
 
             plt.figure()
-            plt.title('Meadian lat and forward velocities in vehicle frame')
+            plt.title('Median lat and forward velocities in vehicle frame')
             plt.plot(np.linspace(0,2*np.pi, 360), errors, label='median lat velocity')
             plt.plot(np.linspace(0,2*np.pi, 360), forward_speeds, label='median forward velocity')
             plt.grid()
             plt.legend()
-            plt.savefig(f'./out_vdr/{sample_id}_median_velocities_vs_mount_anlge.png')
+            plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_median_velocities_vs_mount_angle.png')
             plt.close('all')
 
             # plt.show()
@@ -282,19 +288,20 @@ class GSDC_dataset(Dataset):
 
             plt.plot(acc_s)
             plt.title("Accelerometer in S-frame")
-            plt.savefig(f'./out_vdr/{sample_id}_acc_in_s_frame.png')
+            plt.grid()
+            plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_acc_in_s_frame.png')
             plt.close('all')
 
             # plt.show()
 
             rotate_data.to_csv(rotated_combined_data_path,compression='zip')
 
-        self.task_data[task['sample_id']] = rotate_data
+        return rotate_data
 
 
 
     def map_indexes(self, task):
-        combined_data_path = './out_vdr/' + task['sample_id'] + "_combined_data.csv"
+        combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_combined_data.csv"
         combined_data = pd.read_csv(combined_data_path,compression='zip')
 
         window = self.dataloader_params['window']
@@ -303,9 +310,10 @@ class GSDC_dataset(Dataset):
         N = len(combined_data.t)
 
         windows_indexes = [(i*step, i*step + window) for i in range((N-window)//step)]
+        slice_indexes = []
 
         for w in windows_indexes:
-            self.slice_indexes.append(
+            slice_indexes.append(
                 {
                     'sample_id' : task['sample_id'],
                     'start_idx' : w[0],
@@ -313,6 +321,7 @@ class GSDC_dataset(Dataset):
                 }
             )
 
+        return slice_indexes
 
     def __len__(self):
         return len(self.slice_indexes)
@@ -324,7 +333,15 @@ class GSDC_dataset(Dataset):
         end_idx = idxs['end_idx']
 
         data = self.task_data[sample_id].iloc[start_idx:end_idx]
-        return data
+
+        result = {
+            "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
+            "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
+            "gt_velocity" : torch.tensor(data[['gt_vel_x','gt_vel_y']].values, dtype=torch.float32),
+            "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32)
+        }
+
+        return result
 
 
 if __name__ == "__main__":
@@ -334,9 +351,11 @@ if __name__ == "__main__":
         "frequency": 50
     }
 
-    dataset = GSDC_dataset(**dataloader_params)
+    train_dataset = GSDC_dataset('train', **dataloader_params)
+    # test_dataset = GSDC_dataset('test', **dataloader_params)
 
-    print("Dataset length:", dataset.__len__())
-    for d in dataset:
+
+    print("Dataset length:", train_dataset.__len__())
+    for d in tqdm(train_dataset):
         # print(d)
         pass
