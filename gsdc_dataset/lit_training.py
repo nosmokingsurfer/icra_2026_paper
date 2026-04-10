@@ -1,11 +1,15 @@
 import torch
 import pytorch_lightning as L
 from  pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, BatchSizeFinder
+
 import torch.functional as F
 from  torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from gsdc_dataset.simple_vdr_model import SimpleVDRmodel
 from gsdc_dataset.gsdc_dataloader import GSDC_dataset
+
+import torch.utils.tensorboard
 
 class LIT_SimpleVDRModel(L.LightningModule):
     def __init__(self):
@@ -18,7 +22,16 @@ class LIT_SimpleVDRModel(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
+
+        lr_scheduler = ReduceLROnPlateau(optimizer,factor=0.95, patience=3)
+        return {
+            "optimizer" : optimizer,
+            "lr_scheduler" : {
+                "scheduler" : lr_scheduler,
+                "interval" : "epoch",
+                "monitor" : "train_loss"
+            }
+        }
 
 
     def training_step(self, train_batch, batch_idx):
@@ -52,7 +65,7 @@ if __name__ == "__main__":
     # batch_size_finder = BatchSizeFinder() # TODO
 
     dataloader_params = {
-        "window" : 2000,
+        "window" : 8*125*10,
         "step" : 200,
         "frequency": 50
     }
@@ -74,14 +87,14 @@ if __name__ == "__main__":
 
     trainer = L.Trainer(
         accelerator='auto',
-        max_epochs=20,
+        max_epochs=100,
         callbacks = [
             lr_monitor,
             checkpoint_monitor,
             ]
     )
 
-    train_loader = DataLoader(gsdc_train_dataset,batch_size=64,shuffle=True)
+    train_loader = DataLoader(gsdc_train_dataset,batch_size=32,shuffle=True)
 
     trainer.fit(model, train_loader)
 
