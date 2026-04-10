@@ -29,6 +29,10 @@ class GSDC_dataset(Dataset):
         self.slice_indexes = []
         self.task_data = {}
 
+        if self.mode == "train":
+            pass
+            #TODO set augmentations here yaw_transform
+
         print("Indexing tasks...")
         self.tasks = []
         for t in tqdm(self.imu_files):
@@ -256,10 +260,6 @@ class GSDC_dataset(Dataset):
             plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_median_velocities_vs_mount_angle.png')
             plt.close('all')
 
-            # plt.show()
-
-
-
             # Step 4:
             # rotating data to S-frame - IMU and ground truth speed 
             # putting everything together into single table
@@ -285,14 +285,11 @@ class GSDC_dataset(Dataset):
             rotate_data['gt_vel_x'] = np.sin(-best_yaw_mount)*combined_data.speed.values
             rotate_data['gt_vel_y'] = np.cos(-best_yaw_mount)*combined_data.speed.values
 
-
             plt.plot(acc_s)
             plt.title("Accelerometer in S-frame")
             plt.grid()
             plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_acc_in_s_frame.png')
             plt.close('all')
-
-            # plt.show()
 
             rotate_data.to_csv(rotated_combined_data_path,compression='zip')
 
@@ -334,12 +331,21 @@ class GSDC_dataset(Dataset):
 
         data = self.task_data[sample_id].iloc[start_idx:end_idx]
 
+        quats_sw = data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']].values
+        euler_sw = quaternion.as_euler_angles(quaternion.from_float_array(quats_sw))
+
+
         result = {
             "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
             "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
             "gt_velocity" : torch.tensor(data[['gt_vel_x','gt_vel_y']].values, dtype=torch.float32),
-            "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32)
+            "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32),
+            "yaw_angle" : torch.tensor(euler_sw[:,0], dtype=torch.float32)
         }
+
+        if self.mode == "train":
+            pass
+            # apply augmentatnions here
 
         return result
 
