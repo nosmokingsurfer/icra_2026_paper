@@ -50,7 +50,8 @@ class GSDC_dataset(Dataset):
             )
 
         # TODO apply white lists
-        # self.tasks = self.tasks[:20]
+        self.tasks = self.tasks[:20]
+        print(f"processing {len(self.tasks)} tasks")
 
         print('Preprocessing tasks...')
         with Pool(6) as p:
