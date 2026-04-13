@@ -5,16 +5,21 @@ from  pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, B
 import torch.functional as F
 from  torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.multiprocessing import Pool
+from tqdm import tqdm
+from pathlib import Path
 
 import theseus as th
 
 from gsdc_dataset.th_simple_model import FGO_SimpleVDRModel
-from gsdc_dataset.gsdc_dataloader import GSDC_dataset
+from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
+from gsdc_dataset.lit_training import LIT_GSDC_datamodule
+
 
 import torch.utils.tensorboard
 
 class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
-    def __init__(self,**dataloader_params):
+    def __init__(self,dataloader_params):
         super(LIT_TH_FGO_SimpleVDRModel,self).__init__()
         self.dataloader_params = dataloader_params
         self.model = FGO_SimpleVDRModel(**dataloader_params)
@@ -48,10 +53,13 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
 
         # computing loss
         window = torch.ones((2,1,8))/8
+        window = window.to(gt_traj.device)
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
         gt_traj = torch.conv1d(gt_traj.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         window=torch.ones((1,1,8))/8
+        window = window.to(gt_traj.device)
+
         yaw_angle=torch.conv1d(yaw_angle.unsqueeze(-2),window, stride=8).swapaxes(-1,-2).squeeze()
 
         gt_traj_se2 = torch.concat((gt_traj,yaw_angle.unsqueeze(-1)),dim=-1)
@@ -75,31 +83,96 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
         return loss
 
     def validation_step(self, val_batch, batch_idx):
-        X,y = val_batch
-        pred = self.model(X)
-        loss = F.loss.mse_loss(pred,y)
+        acc = val_batch['acc']
+        gyro = val_batch['gyro']
+        gt_vel = val_batch['gt_velocity']
+        gt_traj = val_batch['gt_traj']
+        yaw_angle = val_batch['yaw_angle']
+
+        out, status = self.model(val_batch)
+
+        # computing loss
+        window = torch.ones((2,1,8))/8
+        window = window.to(gt_traj.device)
+        gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
+        gt_traj = torch.conv1d(gt_traj.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
+
+        window=torch.ones((1,1,8))/8
+        window = window.to(gt_traj.device)
+
+        yaw_angle=torch.conv1d(yaw_angle.unsqueeze(-2),window, stride=8).swapaxes(-1,-2).squeeze()
+
+        gt_traj_se2 = torch.concat((gt_traj,yaw_angle.unsqueeze(-1)),dim=-1)
+        
+        theseus_input = {}
+        for i in range(self.model.N):
+            theseus_input[f'gt_pose_{i}'] = th.SE2(x_y_theta=gt_traj_se2[:,i,:].detach()).tensor
+
+        losses = []
+        for i in range(self.model.N):
+            p = th.SE2(tensor=out[f'pose_{i}'])
+            gt = th.SE2(tensor=theseus_input[f'gt_pose_{i}'])
+            
+            losses.append(torch.linalg.norm(p.local(gt),dim=-1))
+
+        losses = torch.stack(losses, dim=-1)
+
+        loss = torch.mean(losses)
+
         self.log('val_loss', loss, on_epoch=True)
+        return loss
 
 
 if __name__ == "__main__":
-    dataloader_params = {
-        "window" : 8*125*10,
-        "step" : 200,
-        "frequency": 50,
-        "batch_size" : 16
-
-    }
-
-
-    model = LIT_TH_FGO_SimpleVDRModel(**dataloader_params)
 
     # batch_size_finder = BatchSizeFinder() # TODO
 
+    dataloader_params = {
+        "window" : 8*125*10,
+        "step" : 1000,
+        "frequency": 50,
+        "batch_size" : 128
+    }
+
+    data_path = "./data/smartphone-decimeter-2022/"
+    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
 
 
+    print("Indexing tasks...")
+    tasks = []
+    for t in tqdm(imu_files):
+        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
+        imu_file = str(t.parent / "device_imu.csv")
+        gt_file = str(t.parent / "ground_truth.csv")
 
-    gsdc_train_dataset = GSDC_dataset('train', **dataloader_params)
-    # gsdc_val_dataset = GSDC_dataset('test', **dataloader_params)
+        tasks.append(
+            {
+                "sample_id" : sample_id,
+                "mode" : "train",
+                "imu_file" : imu_file,
+                "gt_file" : gt_file
+            }
+        )
+
+
+    print('Preprocessing tasks...')
+    with Pool(6) as p:
+        # generating combined_data
+        res = [p.apply_async(generate_combined_data,args=(t,)) for t in tasks]
+        for r in tqdm(res):
+            r.get()
+
+    with Pool(6) as p:
+        # rotating data
+        res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
+        for idx,r in tqdm(enumerate(res),total=len(tasks)):
+            r.get()
+
+
+    model = LIT_TH_FGO_SimpleVDRModel(dataloader_params)
+
+    gsdc_datamodule = LIT_GSDC_datamodule(tasks, data_path, dataloader_params)
+    gsdc_datamodule.setup('fit')
 
 
     lr_monitor = LearningRateMonitor('epoch')
@@ -113,17 +186,16 @@ if __name__ == "__main__":
 
 
     trainer = L.Trainer(
+        # strategy='ddp_find_unused_parameters_true',
         accelerator='auto',
         max_epochs=100,
         callbacks = [
             lr_monitor,
             checkpoint_monitor,
-            ],
+            ]
     )
 
-    train_loader = DataLoader(gsdc_train_dataset,batch_size=dataloader_params['batch_size'],shuffle=True,drop_last=True)
-
-    trainer.fit(model, train_loader)
+    trainer.fit(model, gsdc_datamodule)
 
 
 

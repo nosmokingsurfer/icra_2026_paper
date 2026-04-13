@@ -85,11 +85,11 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
 
     def train_dataloader(self):
         dataset = GSDC_dataset('train', self.tasks[:2], self.data_path, **self.dataloader_params)
-        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True)
 
     def val_dataloader(self):
         dataset = GSDC_dataset('val', self.tasks[2:4], self.data_path, **self.dataloader_params)
-        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False, drop_last=True)
 
     def test_dataloader(self):
         return super().test_dataloader()

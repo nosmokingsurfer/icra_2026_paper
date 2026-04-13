@@ -84,10 +84,13 @@ class FGO_SimpleVDRModel(nn.Module):
         yaw_angle = sample['yaw_angle']
 
         window = torch.ones((2,1,8))/8
+        window = window.to(gt_traj.device)
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8, groups=2).swapaxes(-1,-2)
         gt_traj = torch.conv1d(gt_traj.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         window=torch.ones((1,1,8))/8
+        window = window.to(gt_traj.device)
+
         yaw_angle=torch.conv1d(yaw_angle.unsqueeze(-2),window, stride=8).swapaxes(-1,-2).squeeze()
 
         imu = torch.concat((acc,gyro),dim=-1).swapaxes(-1,-2)
