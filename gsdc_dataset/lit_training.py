@@ -5,9 +5,12 @@ from  pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, B
 import torch.functional as F
 from  torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.multiprocessing import Pool
+from pathlib import Path
+from tqdm import tqdm
 
 from gsdc_dataset.simple_vdr_model import SimpleVDRmodel
-from gsdc_dataset.gsdc_dataloader import GSDC_dataset
+from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 
 import torch.utils.tensorboard
 
@@ -45,7 +48,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
         pred = self.model(imu)
 
         window = torch.ones((2,1,8))/8
-        
+        window = window.to(gt_vel.device)
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         loss = torch.nn.functional.mse_loss(pred,gt_vel)
@@ -53,10 +56,43 @@ class LIT_SimpleVDRModel(L.LightningModule):
         return loss
 
     def validation_step(self, val_batch, batch_idx):
-        X,y = val_batch
-        pred = self.model(X)
-        loss = F.loss.mse_loss(pred,y)
+        acc = val_batch['acc']
+        gyro = val_batch['gyro']
+        gt_vel = val_batch['gt_velocity']
+        gt_traj = val_batch['gt_traj']
+
+        imu = torch.concat((acc,gyro),dim=-1).swapaxes(-1,-2)
+
+        pred = self.model(imu)
+
+        window = torch.ones((2,1,8))/8
+        window = window.to(gt_vel.device)
+        gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
+
+        loss = torch.nn.functional.mse_loss(pred,gt_vel)
         self.log('val_loss', loss, on_epoch=True)
+        return loss
+
+class LIT_GSDC_datamodule(L.LightningDataModule):
+    def __init__(self, tasks, data_path, dataloader_params):
+        super().__init__()
+        self.tasks = tasks
+        self.data_path = data_path
+        self.dataloader_params = dataloader_params
+
+    def setup(self, stage):
+        super().setup(stage)
+
+    def train_dataloader(self):
+        dataset = GSDC_dataset('train', self.tasks[:2], self.data_path, **self.dataloader_params)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True)
+
+    def val_dataloader(self):
+        dataset = GSDC_dataset('val', self.tasks[2:4], self.data_path, **self.dataloader_params)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False)
+
+    def test_dataloader(self):
+        return super().test_dataloader()
 
 
 if __name__ == "__main__":
@@ -66,13 +102,47 @@ if __name__ == "__main__":
 
     dataloader_params = {
         "window" : 8*125*10,
-        "step" : 200,
-        "frequency": 50
+        "step" : 1000,
+        "frequency": 50,
+        "batch_size" : 128
     }
 
+    data_path = "./data/smartphone-decimeter-2022/"
+    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
 
-    gsdc_train_dataset = GSDC_dataset('train', **dataloader_params)
-    # gsdc_val_dataset = GSDC_dataset('test', **dataloader_params)
+
+    print("Indexing tasks...")
+    tasks = []
+    for t in tqdm(imu_files):
+        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
+        imu_file = str(t.parent / "device_imu.csv")
+        gt_file = str(t.parent / "ground_truth.csv")
+
+        tasks.append(
+            {
+                "sample_id" : sample_id,
+                "mode" : "train",
+                "imu_file" : imu_file,
+                "gt_file" : gt_file
+            }
+        )
+
+
+    print('Preprocessing tasks...')
+    with Pool(6) as p:
+        # generating combined_data
+        res = [p.apply_async(generate_combined_data,args=(t,)) for t in tasks]
+        for r in tqdm(res):
+            r.get()
+
+    with Pool(6) as p:
+        # rotating data
+        res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
+        for idx,r in tqdm(enumerate(res),total=len(tasks)):
+            r.get()
+
+    gsdc_datamodule = LIT_GSDC_datamodule(tasks, data_path, dataloader_params)
+    gsdc_datamodule.setup('fit')
 
 
     lr_monitor = LearningRateMonitor('epoch')
@@ -86,6 +156,7 @@ if __name__ == "__main__":
 
 
     trainer = L.Trainer(
+        # strategy='ddp_find_unused_parameters_true',
         accelerator='auto',
         max_epochs=100,
         callbacks = [
@@ -94,9 +165,7 @@ if __name__ == "__main__":
             ]
     )
 
-    train_loader = DataLoader(gsdc_train_dataset,batch_size=32,shuffle=True)
-
-    trainer.fit(model, train_loader)
+    trainer.fit(model, gsdc_datamodule)
 
 
 
