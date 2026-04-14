@@ -345,7 +345,14 @@ class GSDC_dataset(Dataset):
         }
 
         if self.mode == "train":
-            pass
+            random_rotation_degree = np.random.uniform(low=-180, high=180)
+            random_rotation_radian = random_rotation_degree*2*np.pi/360.0
+            random_rotation_matrix = quaternion.as_rotation_matrix(quaternion.from_euler_angles([random_rotation_radian,0,0]))
+
+            random_rotation_matrix = torch.from_numpy(random_rotation_matrix).to(dtype=torch.float32)
+            result["acc"] = acc_s = result["acc"] @ random_rotation_matrix
+            result["gyro"] = result["gyro"] @ random_rotation_matrix
+            result["gt_velocity"] = result["gt_velocity"] @ random_rotation_matrix[:2,:2]
             # apply augmentatnions here
 
         return result
