@@ -55,7 +55,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         loss = torch.nn.functional.mse_loss(pred,gt_vel)
-        self.log('train_loss', loss, on_epoch=True)
+        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, val_batch, batch_idx):
@@ -73,7 +73,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         loss = torch.nn.functional.mse_loss(pred,gt_vel)
-        self.log('val_loss', loss, on_epoch=True)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         return loss
 
 class LIT_GSDC_datamodule(L.LightningDataModule):
@@ -132,7 +132,6 @@ if __name__ == "__main__":
                 "gt_file" : gt_file
             }
         )
-
 
     print('Preprocessing tasks...')
     with Pool(6) as p:

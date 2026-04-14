@@ -11,6 +11,8 @@ from pathlib import Path
 
 import theseus as th
 
+import sys
+sys.path.insert(0,'.')
 from gsdc_dataset.th_simple_model import FGO_SimpleVDRModel
 from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 from gsdc_dataset.lit_training import LIT_GSDC_datamodule
@@ -23,6 +25,8 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
         super(LIT_TH_FGO_SimpleVDRModel,self).__init__()
         self.dataloader_params = dataloader_params
         self.model = FGO_SimpleVDRModel(**dataloader_params)
+        self.hparams.update(dataloader_params)
+        self.save_hyperparameters()
 
 
     def forward(self,X):
@@ -154,6 +158,8 @@ if __name__ == "__main__":
             }
         )
 
+    tasks = tasks[:10]
+
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
@@ -167,7 +173,6 @@ if __name__ == "__main__":
         res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
         for idx,r in tqdm(enumerate(res),total=len(tasks)):
             r.get()
-
 
     model = LIT_TH_FGO_SimpleVDRModel(dataloader_params)
 
@@ -185,10 +190,12 @@ if __name__ == "__main__":
         )
 
 
+    
     trainer = L.Trainer(
         # strategy='ddp_find_unused_parameters_true',
-        accelerator='auto',
-        max_epochs=100,
+        accelerator='auto' if torch.cuda.is_available() else 'cpu',
+        devices=[0] if torch.cuda.is_available() else None,
+        max_epochs=1000,
         callbacks = [
             lr_monitor,
             checkpoint_monitor,

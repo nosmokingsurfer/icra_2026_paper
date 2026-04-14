@@ -6,9 +6,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from copy import deepcopy
+from pathlib import Path
+from torch.multiprocessing import Pool
+from tqdm import tqdm
 
+import sys
+sys.path.insert(0,'.')
 from gsdc_dataset.simple_vdr_model import SimpleVDRmodel
-from gsdc_dataset.gsdc_dataloader import GSDC_dataset
+from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 
 
 class FGO_SimpleVDRModel(nn.Module):
@@ -105,6 +110,8 @@ class FGO_SimpleVDRModel(nn.Module):
         R[:,:,0,1] = -s
         R[:,:,1,0] = s
 
+        R = R.to(odometry.device)
+
         odometry = (R@odometry.unsqueeze(-1)).squeeze()
 
         predicted_incremental_se2 = torch.concat((odometry, yaw_angle.unsqueeze(-1)),dim=-1)
@@ -114,15 +121,18 @@ class FGO_SimpleVDRModel(nn.Module):
         }
 
         for i in range(self.N-1):
-            theseus_input[f'predicted_odometry_{i}'] = th.SE2(x_y_theta=predicted_incremental_se2[:,i,:]).tensor
+            theseus_input[f'predicted_odometry_{i}'] = th.SE2(x_y_theta=predicted_incremental_se2[:,i,:]).tensor.to(odometry.device)
             
 
         for i in range(self.N):
-            theseus_input[f'gt_pose_{i}'] = th.SE2(x_y_theta=gt_traj_se2[:,i,:].detach()).tensor
-            theseus_input[f'pose_{i}'] = th.SE2(x_y_theta=deepcopy(gt_traj_se2[:,i,:].detach())).tensor
+            theseus_input[f'gt_pose_{i}'] = th.SE2(x_y_theta=gt_traj_se2[:,i,:].detach()).tensor.to(odometry.device)
+            theseus_input[f'pose_{i}'] = th.SE2(x_y_theta=deepcopy(gt_traj_se2[:,i,:].detach())).tensor.to(odometry.device)
 
         # for k,v in theseus_input.items():
         #     print(k,v)
+
+        if not (str(odometry.device) == "cpu"):
+            self.theseus_layer = self.theseus_layer.to(odometry.device)
 
         self.theseus_layer.objective.update(theseus_input)
 
@@ -139,23 +149,56 @@ class FGO_SimpleVDRModel(nn.Module):
 if __name__ == "__main__":
 
     dataloader_params = {
-        "window" : 8*125*1,
-        "step" : 200,
-        "frequency" : 50,
-        "batch_size" : 3
+        "window" : 8*125*10,
+        "step" : 1000,
+        "frequency": 50,
+        "batch_size" : 128
     }
 
-    dataset = GSDC_dataset("train", **dataloader_params)
+    data_path = "./data/smartphone-decimeter-2022/"
+    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
+
+
+    print("Indexing tasks...")
+    tasks = []
+    for t in tqdm(imu_files):
+        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
+        imu_file = str(t.parent / "device_imu.csv")
+        gt_file = str(t.parent / "ground_truth.csv")
+
+        tasks.append(
+            {
+                "sample_id" : sample_id,
+                "mode" : "train",
+                "imu_file" : imu_file,
+                "gt_file" : gt_file
+            }
+        )
+
+    tasks = tasks[:2]
+
+
+    print('Preprocessing tasks...')
+    with Pool(6) as p:
+        # generating combined_data
+        res = [p.apply_async(generate_combined_data,args=(t,)) for t in tasks]
+        for r in tqdm(res):
+            r.get()
+
+    with Pool(6) as p:
+        # rotating data
+        res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
+        for idx,r in tqdm(enumerate(res),total=len(tasks)):
+            r.get()
+
+    dataset = GSDC_dataset("train",tasks, data_path, **dataloader_params)
 
     model = FGO_SimpleVDRModel(**dataloader_params)
 
-    train_dataloader = DataLoader(dataset, batch_size=dataloader_params['batch_size'], shuffle=True)
+    train_dataloader = DataLoader(dataset, batch_size=dataloader_params['batch_size'], shuffle=True, drop_last=True)
 
     for sample in train_dataloader:
 
-        output  = model(sample)
+        output, status  = model(sample)
 
         print(output)
-
-
-        
