@@ -158,9 +158,6 @@ if __name__ == "__main__":
             }
         )
 
-    tasks = tasks[:10]
-
-
     print('Preprocessing tasks...')
     with Pool(6) as p:
         # generating combined_data
