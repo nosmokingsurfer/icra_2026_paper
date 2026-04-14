@@ -9,6 +9,8 @@ from torch.multiprocessing import Pool
 from pathlib import Path
 from tqdm import tqdm
 
+import sys
+sys.path.insert(0,'.')
 from gsdc_dataset.simple_vdr_model import SimpleVDRmodel
 from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 
@@ -18,6 +20,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
     def __init__(self):
         super(LIT_SimpleVDRModel,self).__init__()
         self.model = SimpleVDRmodel()
+        self.save_hyperparameters()
 
 
     def forward(self,X):
@@ -79,16 +82,19 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
         self.tasks = tasks
         self.data_path = data_path
         self.dataloader_params = dataloader_params
+        self.hparams.update(dataloader_params)
+        self.save_hyperparameters()
 
     def setup(self, stage):
         super().setup(stage)
+        # TODO make split for train and val here
 
     def train_dataloader(self):
-        dataset = GSDC_dataset('train', self.tasks[:2], self.data_path, **self.dataloader_params)
+        dataset = GSDC_dataset('train', self.tasks, self.data_path, **self.dataloader_params)
         return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True)
 
     def val_dataloader(self):
-        dataset = GSDC_dataset('val', self.tasks[2:4], self.data_path, **self.dataloader_params)
+        dataset = GSDC_dataset('val', self.tasks, self.data_path, **self.dataloader_params)
         return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False, drop_last=True)
 
     def test_dataloader(self):
@@ -157,8 +163,9 @@ if __name__ == "__main__":
 
     trainer = L.Trainer(
         # strategy='ddp_find_unused_parameters_true',
-        accelerator='auto',
-        max_epochs=100,
+        accelerator='auto' if torch.cuda.is_available() else 'cpu',
+        devices=[0] if torch.cuda.is_available() else None,
+        max_epochs=1000,
         callbacks = [
             lr_monitor,
             checkpoint_monitor,
