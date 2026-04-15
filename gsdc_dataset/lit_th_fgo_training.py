@@ -16,7 +16,7 @@ sys.path.insert(0,'.')
 from gsdc_dataset.th_simple_model import FGO_SimpleVDRModel
 from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 from gsdc_dataset.lit_training import LIT_GSDC_datamodule
-from gsdc.utils import get_tasks_for_dataset
+from gsdc_dataset.utils import get_tasks_for_dataset
 
 
 import torch.utils.tensorboard
@@ -27,6 +27,7 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
         self.dataloader_params = dataloader_params
         self.model = FGO_SimpleVDRModel(**dataloader_params)
         self.hparams.update(dataloader_params)
+        self.hparams.update({'architecture' : "th_fgo_simple_vdr_model"})
         self.save_hyperparameters()
 
 
@@ -141,7 +142,8 @@ if __name__ == "__main__":
 
     data_path = "./data/smartphone-decimeter-2022/"
 
-    tasks = get_tasks_for_dataset
+    tasks = get_tasks_for_dataset()
+    tasks = tasks[:2]
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
