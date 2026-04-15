@@ -9,11 +9,52 @@ import pandas as pd
 import os
 import quaternion
 
+from typing import List, Dict
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from multiprocessing import Pool
 import pymap3d as pm
 import ahrs
+
+import sys
+sys.path.insert(0,'.')
+
+from gsdc_dataset.utils import get_tasks_for_dataset
+
+
+def zero_padding_collate(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    collated = {}
+    
+    keys = batch[0].keys()
+    keys = [k for k in keys if k not in ["task"]]
+    
+    lengths = [item['acc'].shape[0] for item in batch]
+    for key in keys:
+        tensors = [item[key] for item in batch]
+        max_len = max(t.shape[0] for t in tensors)
+        
+        if tensors[0].dim() == 2:
+            feature_dim = tensors[0].shape[1]
+            padded_tensors = []
+            for t in tensors:
+                padded = torch.zeros(max_len, feature_dim, dtype=t.dtype)
+                padded[:t.shape[0], :] = t
+                padded_tensors.append(padded)
+        elif tensors[0].dim() == 1:
+            padded_tensors = []
+            for t in tensors:
+                padded = torch.zeros(max_len, dtype=t.dtype)
+                padded[:t.shape[0]] = t
+                padded_tensors.append(padded)
+        else:
+            raise ValueError(f"Unsupported tensor dimension: {tensors[0].dim()}")
+
+        collated[key] = torch.stack(padded_tensors)
+    
+    collated['lengths'] = torch.tensor(lengths,dtype=torch.int64,device=batch[0]['acc'].device)
+    collated['task'] = [t['task'] for t in batch]
+
+    return collated
 
 class GSDC_dataset(Dataset):
     def __init__(self, mode, tasks, data_path,  **args):
@@ -50,9 +91,39 @@ class GSDC_dataset(Dataset):
 
 
     def __len__(self):
-        return self.global_index_accumulator
+        if self.mode in ['train','val']:
+            return self.global_index_accumulator
+        elif self.mode == 'test':
+            return len(self.task_indexes)
+
+    def get_test_item(self, idx):
+        global_index, sample_id, num_steps = self.task_indexes[idx]
+
+        data = self.task_data[sample_id]
+
+        quats_sw = data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']].values
+        euler_sw = quaternion.as_euler_angles(quaternion.from_float_array(quats_sw))
+
+        result = {
+            "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
+            "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
+            "gt_velocity" : torch.tensor(data[['gt_vel_x','gt_vel_y']].values, dtype=torch.float32),
+            "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32),
+            "yaw_angle" : torch.tensor(euler_sw[:,0], dtype=torch.float32),
+            "task" : self.tasks[idx]
+        }
+
+        # if len(result['acc'].shape) == 2:
+        #     for k,v in result.items():
+        #         result[k] = v.unsqueeze(0)
+
+        return result
+
 
     def __getitem__(self, idx):
+        if self.mode == 'test':
+            return self.get_test_item(idx)
+
         window = self.dataloader_params['window']
         step = self.dataloader_params['step']
 
@@ -69,7 +140,6 @@ class GSDC_dataset(Dataset):
         quats_sw = data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']].values
         euler_sw = quaternion.as_euler_angles(quaternion.from_float_array(quats_sw))
 
-
         result = {
             "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
             "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
@@ -83,15 +153,17 @@ class GSDC_dataset(Dataset):
         #         result[k] = v.unsqueeze(0)
 
 
-        if self.mode == "train":
-            random_rotation_degree = np.random.uniform(low=-180, high=180)
-            random_rotation_radian = random_rotation_degree*2*np.pi/360.0
-            random_rotation_matrix = quaternion.as_rotation_matrix(quaternion.from_euler_angles([random_rotation_radian,0,0]))
+        if (self.mode == "train"):
+            prob = np.random.uniform(low=0,high=1)
+            if prob > 0.7:
+                random_rotation_degree = np.random.uniform(low=-180, high=180)
+                random_rotation_radian = random_rotation_degree*2*np.pi/360.0
+                random_rotation_matrix = quaternion.as_rotation_matrix(quaternion.from_euler_angles([random_rotation_radian,0,0]))
 
-            random_rotation_matrix = torch.from_numpy(random_rotation_matrix).to(dtype=torch.float32)
-            result["acc"] = acc_s = result["acc"] @ random_rotation_matrix
-            result["gyro"] = result["gyro"] @ random_rotation_matrix
-            result["gt_velocity"] = result["gt_velocity"] @ random_rotation_matrix[:2,:2]
+                random_rotation_matrix = torch.from_numpy(random_rotation_matrix).to(dtype=torch.float32)
+                result["acc"] = acc_s = result["acc"] @ random_rotation_matrix
+                result["gyro"] = result["gyro"] @ random_rotation_matrix
+                result["gt_velocity"] = result["gt_velocity"] @ random_rotation_matrix[:2,:2]
             # apply augmentatnions here
 
         return result
@@ -331,25 +403,8 @@ if __name__ == "__main__":
     }
 
     data_path = "./data/smartphone-decimeter-2022/"
-    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
 
-
-    print("Indexing tasks...")
-    tasks = []
-    for t in tqdm(imu_files):
-        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
-        imu_file = str(t.parent / "device_imu.csv")
-        gt_file = str(t.parent / "ground_truth.csv")
-
-        tasks.append(
-            {
-                "sample_id" : sample_id,
-                "mode" : "train",
-                "imu_file" : imu_file,
-                "gt_file" : gt_file
-            }
-        )
-
+    tasks = get_tasks_for_dataset()
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
@@ -364,12 +419,17 @@ if __name__ == "__main__":
         for idx,r in tqdm(enumerate(res),total=len(tasks)):
             r.get()
 
-    train_dataset = GSDC_dataset('train',tasks, data_path, **dataloader_params)
-    # test_dataset = GSDC_dataset('test', **dataloader_params)
+    # dataset = GSDC_dataset('train',tasks, data_path, **dataloader_params)
+    dataset = GSDC_dataset('test',tasks, data_path, **dataloader_params)
 
     print("--- %s seconds ---" % (time.time()-start_time))
 
-    print("Dataset length:", train_dataset.__len__())
-    for d in tqdm(train_dataset):
+    print("Dataset length:", dataset.__len__())
+    for d in tqdm(dataset):
         # print(d)
         pass
+
+    dataloader = DataLoader(dataset, batch_size=2, drop_last= True, collate_fn=zero_padding_collate)
+
+    for d in tqdm(dataloader):
+        print(d)

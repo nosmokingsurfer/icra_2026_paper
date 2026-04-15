@@ -16,6 +16,7 @@ sys.path.insert(0,'.')
 from gsdc_dataset.th_simple_model import FGO_SimpleVDRModel
 from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
 from gsdc_dataset.lit_training import LIT_GSDC_datamodule
+from gsdc.utils import get_tasks_for_dataset
 
 
 import torch.utils.tensorboard
@@ -83,7 +84,7 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
 
         loss = torch.mean(losses)
 
-        self.log('train_loss', loss, on_epoch=True)
+        self.log('train_loss', loss, on_epoch=True,prog_bar=True)
         return loss
 
     def validation_step(self, val_batch, batch_idx):
@@ -123,7 +124,7 @@ class LIT_TH_FGO_SimpleVDRModel(L.LightningModule):
 
         loss = torch.mean(losses)
 
-        self.log('val_loss', loss, on_epoch=True)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         return loss
 
 
@@ -139,24 +140,8 @@ if __name__ == "__main__":
     }
 
     data_path = "./data/smartphone-decimeter-2022/"
-    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
 
-
-    print("Indexing tasks...")
-    tasks = []
-    for t in tqdm(imu_files):
-        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
-        imu_file = str(t.parent / "device_imu.csv")
-        gt_file = str(t.parent / "ground_truth.csv")
-
-        tasks.append(
-            {
-                "sample_id" : sample_id,
-                "mode" : "train",
-                "imu_file" : imu_file,
-                "gt_file" : gt_file
-            }
-        )
+    tasks = get_tasks_for_dataset
 
     print('Preprocessing tasks...')
     with Pool(6) as p:

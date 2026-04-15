@@ -7,12 +7,16 @@ from  torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.multiprocessing import Pool
 from pathlib import Path
+import pandas as pd
+import numpy as np
 from tqdm import tqdm
+import json
 
 import sys
 sys.path.insert(0,'.')
 from gsdc_dataset.simple_vdr_model import SimpleVDRmodel
-from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data
+from gsdc_dataset.gsdc_dataloader import GSDC_dataset, generate_combined_data, rotate_data, zero_padding_collate
+from gsdc_dataset.utils import get_tasks_for_dataset
 
 import torch.utils.tensorboard
 
@@ -20,6 +24,9 @@ class LIT_SimpleVDRModel(L.LightningModule):
     def __init__(self):
         super(LIT_SimpleVDRModel,self).__init__()
         self.model = SimpleVDRmodel()
+        self.hparams.update(
+            {"architecture" : "simple_vdr_model"}
+        )
         self.save_hyperparameters()
 
 
@@ -76,6 +83,44 @@ class LIT_SimpleVDRModel(L.LightningModule):
         self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         return loss
 
+    def test_step(self, test_batch, test_idx):
+        lengths = test_batch['lengths'].detach().numpy()
+        acc = test_batch['acc']
+        gyro = test_batch['gyro']
+        gt_vel = test_batch['gt_velocity']
+        gt_traj = test_batch['gt_traj']
+        task = test_batch['task']
+
+        sample_id = [t['sample_id'] for t in task]
+        checkpoit_idx = [t['checkpoint_idx'] for t in task]
+        
+
+        imu = torch.concat((acc,gyro),dim=-1).swapaxes(-1,-2)
+
+        pred = self.model(imu)
+
+        window = torch.ones((2,1,8))/8
+        window = window.to(gt_vel.device)
+        gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2,).swapaxes(-1,-2)
+
+        lengths = lengths//8
+
+        minlength = min(pred.shape[1],gt_vel.shape[1])
+        pred = pred[:,:minlength]
+        gt_vel = gt_vel[:,:minlength]
+
+        loss = torch.nn.functional.mse_loss(pred,gt_vel)
+        self.log('test_loss', loss, on_epoch=True,batch_size=test_batch['acc'].shape[0])
+
+        for b in range(test_batch['acc'].shape[0]):
+            result = {}
+            pred_path = f"./out_vdr/{checkpoit_idx[b]}/{sample_id[b]}_predictions.csv"
+
+            result = pd.DataFrame(np.concatenate((pred[0].detach().numpy(),gt_vel[0].detach().numpy()),axis=-1), columns = ['pred_s_vx','pred_s_vy','gt_s_vx','gt_s_vy'])
+            result = result[:lengths[b]]
+            result.to_csv(pred_path, index=False)
+        return loss
+
 class LIT_GSDC_datamodule(L.LightningDataModule):
     def __init__(self, tasks, data_path, dataloader_params):
         super().__init__()
@@ -91,14 +136,15 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
 
     def train_dataloader(self):
         dataset = GSDC_dataset('train', self.tasks, self.data_path, **self.dataloader_params)
-        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True,num_workers=8)
 
     def val_dataloader(self):
         dataset = GSDC_dataset('val', self.tasks, self.data_path, **self.dataloader_params)
-        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False, drop_last=True)
+        return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False, drop_last=True, num_workers=8)
 
     def test_dataloader(self):
-        return super().test_dataloader()
+        dataset = GSDC_dataset('test', self.tasks, self.data_path, **self.dataloader_params)
+        return DataLoader(dataset,batch_size=2, shuffle=False, drop_last=True, num_workers=2, collate_fn=zero_padding_collate)
 
 
 if __name__ == "__main__":
@@ -114,24 +160,7 @@ if __name__ == "__main__":
     }
 
     data_path = "./data/smartphone-decimeter-2022/"
-    imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
-
-
-    print("Indexing tasks...")
-    tasks = []
-    for t in tqdm(imu_files):
-        sample_id = t.parts[-3].replace('-','_') + "_" + t.parts[-2]
-        imu_file = str(t.parent / "device_imu.csv")
-        gt_file = str(t.parent / "ground_truth.csv")
-
-        tasks.append(
-            {
-                "sample_id" : sample_id,
-                "mode" : "train",
-                "imu_file" : imu_file,
-                "gt_file" : gt_file
-            }
-        )
+    tasks = get_tasks_for_dataset()
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
