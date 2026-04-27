@@ -3,7 +3,7 @@ import pytorch_lightning as L
 from  pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, BatchSizeFinder
 
 import torch.functional as F
-from  torch.utils.data import DataLoader
+from  torch.utils.data import DataLoader, random_split
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.multiprocessing import Pool
 from pathlib import Path
@@ -21,9 +21,10 @@ from gsdc_dataset.utils import get_tasks_for_dataset
 import torch.utils.tensorboard
 
 class LIT_SimpleVDRModel(L.LightningModule):
-    def __init__(self):
+    def __init__(self, dataloader_params):
         super(LIT_SimpleVDRModel,self).__init__()
         self.model = SimpleVDRmodel()
+        self.dataloader_params = dataloader_params
         self.hparams.update(
             {"architecture" : "simple_vdr_model"}
         )
@@ -34,9 +35,9 @@ class LIT_SimpleVDRModel(L.LightningModule):
         return self.model(X)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.dataloader_params['learning_rate'])
 
-        lr_scheduler = ReduceLROnPlateau(optimizer,factor=0.95, patience=3)
+        lr_scheduler = ReduceLROnPlateau(optimizer,factor=0.97, patience=3)
         return {
             "optimizer" : optimizer,
             "lr_scheduler" : {
@@ -62,7 +63,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         loss = torch.nn.functional.mse_loss(pred,gt_vel)
-        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('train_loss', loss, prog_bar=True)
         return loss
 
     def validation_step(self, val_batch, batch_idx):
@@ -80,7 +81,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
         gt_vel = torch.conv1d(gt_vel.swapaxes(-1,-2),window,stride=8,groups=2).swapaxes(-1,-2)
 
         loss = torch.nn.functional.mse_loss(pred,gt_vel)
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('val_loss', loss, prog_bar=True)
         return loss
 
     def test_step(self, test_batch, test_idx):
@@ -93,7 +94,6 @@ class LIT_SimpleVDRModel(L.LightningModule):
 
         sample_id = [t['sample_id'] for t in task]
         checkpoit_idx = [t['checkpoint_idx'] for t in task]
-        
 
         imu = torch.concat((acc,gyro),dim=-1).swapaxes(-1,-2)
 
@@ -134,6 +134,16 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
         super().setup(stage)
         # TODO make split for train and val here
 
+        # train_ratio = self.dataloader_params['train_ratio']
+
+        # train_length = train_ratio*len(self.tasks)
+        # val_length = len(self.tasks) - train_length
+
+        # subset_A
+
+
+
+
     def train_dataloader(self):
         dataset = GSDC_dataset('train', self.tasks, self.data_path, **self.dataloader_params)
         return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True,num_workers=8)
@@ -148,33 +158,39 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
 
 
 if __name__ == "__main__":
-    model = LIT_SimpleVDRModel()
-
     # batch_size_finder = BatchSizeFinder() # TODO
 
     dataloader_params = {
         "window" : 8*125*10,
         "step" : 1000,
         "frequency": 50,
-        "batch_size" : 128
+        "batch_size" : 32,
+        "train_ratio" : 0.7,
+        "learning_rate" : 1e-3
     }
 
     data_path = "./data/smartphone-decimeter-2022/"
-    tasks = get_tasks_for_dataset()
+    tasks = get_tasks_for_dataset(data_path)
+    tasks = tasks[:2]
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
         # generating combined_data
-        res = [p.apply_async(generate_combined_data,args=(t,)) for t in tasks]
+        res = [p.apply_async(generate_combined_data,args=(t,dataloader_params['frequency'])) for t in tasks]
         for r in tqdm(res):
             r.get()
 
+    for t in tasks:
+        rotate_data(t,dataloader_params['frequency'])
+
     with Pool(6) as p:
         # rotating data
-        res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
+        res = [p.apply_async(rotate_data,args=(t,dataloader_params['frequency'])) for t in tasks]
         for idx,r in tqdm(enumerate(res),total=len(tasks)):
             r.get()
 
+
+    model = LIT_SimpleVDRModel(dataloader_params)
     gsdc_datamodule = LIT_GSDC_datamodule(tasks, data_path, dataloader_params)
     gsdc_datamodule.setup('fit')
 

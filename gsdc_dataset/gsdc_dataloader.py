@@ -101,15 +101,15 @@ class GSDC_dataset(Dataset):
 
         data = self.task_data[sample_id]
 
-        quats_sw = data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']].values
-        euler_sw = quaternion.as_euler_angles(quaternion.from_float_array(quats_sw))
+        quats_wi = data[['q_wi_w','q_wi_x','q_wi_y','q_wi_z']].values
+        euler_wi = quaternion.as_euler_angles(quaternion.from_float_array(quats_wi))
 
         result = {
             "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
             "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
             "gt_velocity" : torch.tensor(data[['gt_vel_x','gt_vel_y']].values, dtype=torch.float32),
             "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32),
-            "yaw_angle" : torch.tensor(euler_sw[:,0], dtype=torch.float32),
+            "yaw_angle" : torch.tensor(euler_wi[:,0], dtype=torch.float32),
             "task" : self.tasks[idx]
         }
 
@@ -137,15 +137,15 @@ class GSDC_dataset(Dataset):
 
         data = self.task_data[sample_id].iloc[start_idx:end_idx]
 
-        quats_sw = data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']].values
-        euler_sw = quaternion.as_euler_angles(quaternion.from_float_array(quats_sw))
+        quats_wi = data[['q_wi_w','q_wi_x','q_wi_y','q_wi_z']].values
+        euler_wi = quaternion.as_euler_angles(quaternion.from_float_array(quats_wi))
 
         result = {
             "acc" : torch.tensor(data[['a_s_x','a_s_y','a_s_z']].values, dtype=torch.float32),
             "gyro" : torch.tensor(data[['w_s_x','w_s_y','w_s_z']].values, dtype=torch.float32),
             "gt_velocity" : torch.tensor(data[['gt_vel_x','gt_vel_y']].values, dtype=torch.float32),
             "gt_traj" : torch.tensor(data[['e','n']].values, dtype=torch.float32),
-            "yaw_angle" : torch.tensor(euler_sw[:,0], dtype=torch.float32)
+            "yaw_angle" : torch.tensor(euler_wi[:,0], dtype=torch.float32)
         }
 
         # if len(result['acc'].shape) == 2:
@@ -153,22 +153,22 @@ class GSDC_dataset(Dataset):
         #         result[k] = v.unsqueeze(0)
 
 
-        if (self.mode == "train"):
-            prob = np.random.uniform(low=0,high=1)
-            if prob > 0.7:
-                random_rotation_degree = np.random.uniform(low=-180, high=180)
-                random_rotation_radian = random_rotation_degree*2*np.pi/360.0
-                random_rotation_matrix = quaternion.as_rotation_matrix(quaternion.from_euler_angles([random_rotation_radian,0,0]))
+        # if (self.mode == "train"):
+        #     prob = np.random.uniform(low=0,high=1)
+        #     if prob < 0.7:
+        #         random_rotation_degree = np.random.uniform(low=-180, high=180)
+        #         random_rotation_radian = random_rotation_degree*2*np.pi/360.0
+        #         random_rotation_matrix = quaternion.as_rotation_matrix(quaternion.from_euler_angles([random_rotation_radian,0,0]))
 
-                random_rotation_matrix = torch.from_numpy(random_rotation_matrix).to(dtype=torch.float32)
-                result["acc"] = acc_s = result["acc"] @ random_rotation_matrix
-                result["gyro"] = result["gyro"] @ random_rotation_matrix
-                result["gt_velocity"] = result["gt_velocity"] @ random_rotation_matrix[:2,:2]
+        #         random_rotation_matrix = torch.from_numpy(random_rotation_matrix).to(dtype=torch.float32)
+        #         result["acc"] = acc_s = result["acc"] @ random_rotation_matrix
+        #         result["gyro"] = result["gyro"] @ random_rotation_matrix
+        #         result["gt_velocity"] = result["gt_velocity"] @ random_rotation_matrix[:2,:2]
             # apply augmentatnions here
 
         return result
 
-def generate_combined_data(task, frequency=50):
+def generate_combined_data(task, frequency=100):
 
     combined_data_path = './out_vdr/' + f"{task['mode']}/"+ task['sample_id'] + "_combined_data.pickle"
     if os.path.exists(combined_data_path):
@@ -192,9 +192,14 @@ def generate_combined_data(task, frequency=50):
     gyro.columns = ['t','w_x','w_y','w_z','bias_x','bias_y','bias_z']
     gyro['t'] = gyro['t'].values/1e+3
 
+    # TODO add magnetometer
+    # read uncalibrated messages
+
     gt_df = pd.read_csv(task['gt_file'])
     gt_df = gt_df[['UnixTimeMillis','LatitudeDegrees', 'LongitudeDegrees', 'AltitudeMeters', 'SpeedMps', 'BearingDegrees']]
     gt_df.columns = ['t','lat','lon','alt','speed','bearing']
+    gt_df['bearing'] = -1.*gt_df['bearing']+90
+    gt_df['bearing'] = gt_df['bearing']*np.pi/180.
     gt_df['t'] = gt_df['t'].values/1e+3
 
     t_min = max(min(acc.t), min(gyro.t), min(gt_df.t))
@@ -233,7 +238,8 @@ def generate_combined_data(task, frequency=50):
         combined_data.to_pickle(combined_data_path)
 
 
-def rotate_data(task):
+def rotate_data(task, frequency=100):
+    visualize = True
     sample_id = task['sample_id']
 
     rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_rotated_combined_data.pickle"
@@ -257,53 +263,99 @@ def rotate_data(task):
     combined_data['e'] = e
     combined_data['n'] = n
 
+    if visualize:
+        plt.plot(e,n,label='gt trajectory')
+        plt.title(f"{task['sample_id']}")
+        plt.grid();plt.axis('equal');plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{task["sample_id"]}_gt_trajectory.png')
+        plt.close('all')
+
+
     # step 2:
     # computing attitude of IMU in local fixed frame:
-    quats_iw = ahrs.filters.Madgwick(
+    quats_wi = ahrs.filters.Madgwick(
         gyr= combined_data[['w_x','w_y','w_z']].values,
         acc = combined_data[['a_x','a_y','a_z']].values,
-        frequency = 50.).Q
+        frequency = frequency).Q
 
-    quats_iw = quaternion.from_float_array(quats_iw)
+    quats_wi = quaternion.from_float_array(quats_wi)
 
-    # Array with the 4 elements of quaternion of the form [w, x, y, z]
-    plt.plot(np.unwrap(quaternion.as_euler_angles(quats_iw),axis=0),label=['yaw','pitch','roll'])
-    plt.title('Euler angles from local fixed frame to IMU frame')
-    plt.grid()
+    # yaw pitch roll from IMU to some fixed frame
+    euler_wi = np.unwrap(quaternion.as_euler_angles(quats_wi),axis=0)
 
-    plt.plot(np.unwrap(combined_data.bearing/180*np.pi - np.pi) + np.pi,'-',color='red', label='bearing from pvt')
-    plt.legend()
-    plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_euler_w_to_imu.png')
-    plt.close('all')
-    # plt.show()
+    if visualize:
+        # Array with the 4 elements of quaternion of the form [w, x, y, z]
+        plt.plot(np.unwrap(quaternion.as_euler_angles(quats_wi),axis=0),label=['yaw','pitch','roll'])
+        plt.title('Euler angles from IMU frame to local fixed frame')
+        plt.grid()
 
-    # yaw pitch roll from some fixed frame to IMU
-    imu_euler = np.unwrap(quaternion.as_euler_angles(quats_iw),axis=0)
+        plt.plot(np.unwrap(combined_data.bearing.values),'-',color='red', label='bearing from pvt')
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_euler_w_to_imu.png')
+        plt.close('all')
 
-    # keeping only pitch and roll angles to rotate IMU to S-frame
-    s_euler = -imu_euler.copy() # here we have minus sign - need rotation FROM imu frame to S-frame
-    s_euler[:,0] = 0
-    quats_sw = quaternion.from_euler_angles(s_euler)
+    # keeping only pitch and roll angles to rotate IMU frame to S-frame
+    euler_si = euler_wi.copy()
+    euler_si[:,0] = 0 # not changing the yaw angle when rotating
+    quats_si = quaternion.from_euler_angles(euler_si)
+
+    if visualize:
+        R_si = quaternion.as_rotation_matrix(quaternion.from_euler_angles(euler_si))
+
+        plt.plot((R_si @ combined_data[['a_x','a_y','a_z']].values.reshape(-1,3,1)).squeeze(), label=['ax','ay','az'])
+        plt.title("Accelerometer in S-frame")
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_acc_in_s_frame.png')
+        plt.close('all')
+
+
+    # TODO try use WMM to compute mount angle
 
     # Step 3: computing mount angle
     # keeping only heading angles to project PVT speed from ENU to S-frame with some unknown mount angle
-    yaw_euler = imu_euler.copy()
-    yaw_euler[:,1:] = 0
+    euler_sw = - euler_wi.copy() # here have minus sign because the rotation is opposite
+    euler_sw[:,1:] = 0
+    R_sw = quaternion.as_rotation_matrix(quaternion.from_euler_angles(euler_sw))
 
-    ve = combined_data.speed.values*np.cos(combined_data.bearing.values*np.pi/180.)
-    vn = combined_data.speed.values*np.sin(combined_data.bearing.values*np.pi/180.)
+    # velocity in ENU frame
+    ve = combined_data.speed.values*np.cos(combined_data.bearing.values)
+    vn = combined_data.speed.values*np.sin(combined_data.bearing.values)
     vu = np.zeros_like(ve)
 
-    R_sw_yaw = quaternion.as_rotation_matrix(quaternion.from_euler_angles(yaw_euler))
+    if visualize:
+        start_idx = 200
+        end_idx = 10000 + start_idx
+        step = frequency*4
+        arrow_length = 100
 
-    v = np.vstack((ve,vn,vu)).transpose().reshape(-1,3,1)
+        plt.plot(e[start_idx:end_idx], n[start_idx:end_idx],label='gt trajectory')
+        for i in range(start_idx, end_idx, step):
+            plt.arrow(e[i],n[i],
+            arrow_length*np.cos(combined_data.bearing[i]),
+            arrow_length*np.sin(combined_data.bearing[i]),
+            color='red')
+        plt.grid()
+        plt.title(f"{task['sample_id']}")
+        plt.axis('equal')
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_gt_trjectory_with_speed_direction.png')
+        plt.close('all')
+
+        plt.plot(ve, label='gt ve')
+        plt.plot(vn, label='gt vn')
+        plt.title(f"{task['sample_id']}")
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_gt_velocity_enu.png')
+        plt.close('all')
+
+    v_enu = np.vstack((ve, vn, vu)).transpose().reshape(-1,3,1)
+
+    v_s = (R_sw @ v_enu).squeeze()
     # now velocity projected to some horizontal moving frame
     # need estimate how it is aligned relatie to vehicle body
 
-    vs = (R_sw_yaw @ v).squeeze()
-    vs_x = vs[:,0]
-
-    vs_y_min = np.inf
+    vs_x_min = np.inf
     best_arg = -1
     r_z = None
     yaw_mount = None
@@ -312,43 +364,57 @@ def rotate_data(task):
     forward_speeds = [None]*360
     print("Probing mount yaw angle...")
     for i in range(360):
-        yaw_mount = i*2*np.pi/360.0
-
-        r_z = quaternion.as_rotation_matrix(quaternion.from_euler_angles([yaw_mount,0,0]))
-
-        # plt.plot((r_z @ vs.reshape(-1,3,1)).squeeze()[:,1])
+        # brute forcing all mount angles - yaw angle between vehicle frame and S-frame
         # vehicle frame - X - to the right, Y - forward, Z- up
-        # looking for minimal median lateral velocity (projectino on X-axis) in vehicle frame  + positive median forward motion (Y-axis)
-        cur = np.median(np.abs(r_z @ vs.reshape(-1,3,1)).squeeze()[:,0]) # projection on X-axis
-        errors[i] = cur
-        forward_speeds[i] = np.median(r_z @ vs.reshape(-1,3,1), axis=0)[1]
+        yaw_mount = i*2*np.pi/360.0
+        R_yaw = quaternion.as_rotation_matrix(quaternion.from_euler_angles([yaw_mount,0,0]))
 
-        if (cur < vs_y_min) and  (forward_speeds[i]> 0):
-            vs_y_min = cur
+        # looking for minimal median lateral velocity (projectino on X-axis) in vehicle frame  + positive median forward motion (Y-axis)
+        v_v = R_yaw @ v_s.reshape(-1,3,1) # projection on X-axis
+        errors[i] = np.median(np.abs(v_v)[:,0],axis=0)
+        forward_speeds[i] = np.median(v_v, axis=0)[1]
+
+        if (errors[i] < vs_x_min) and  (forward_speeds[i]> 0):
+            vs_x_min = errors[i]
             best_arg = i
-            best_r_z = r_z
+            best_R_yaw = R_yaw
             best_yaw_mount = yaw_mount
 
-    v_vehicle = (best_r_z@vs.reshape(-1,3,1)).squeeze()
+    v_v = (best_R_yaw @ v_s.reshape(-1,3,1)).squeeze()
 
-    ve_s = combined_data.speed.values*np.cos(combined_data.bearing.values*np.pi/180.)
-    vn_s = combined_data.speed.values*np.sin(combined_data.bearing.values*np.pi/180.)
-    v_s = np.vstack((ve_s,vn_s)).transpose().reshape(-1,2,1)
+    if visualize:
+        plt.plot(v_v,label=['v_vehicle_x', 'v_vehicle_y','v_vehicle_z'])
+        plt.title(f"PVT velocity in vehicle frame\nMount angle: {best_yaw_mount}")
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_vehicle_frame.png')
+        plt.close('all')
 
-    plt.plot(v_vehicle,label=['v_vehicle_x', 'v_vehicle_y','v_vehicle_z'])
-    plt.title(f"PVT velocity in vehicle frame\nMount angle: {best_yaw_mount}")
-    plt.grid()
-    plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_vehicle_frame.png')
-    plt.close('all')
 
-    plt.figure()
-    plt.title('Median lat and forward velocities in vehicle frame')
-    plt.plot(np.linspace(0,2*np.pi, 360), errors, label='median lat velocity')
-    plt.plot(np.linspace(0,2*np.pi, 360), forward_speeds, label='median forward velocity')
-    plt.grid()
-    plt.legend()
-    plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_median_velocities_vs_mount_angle.png')
-    plt.close('all')
+        plt.figure()
+        plt.title(f'Median lat and forward velocities in vehicle frame\nMount angle: {best_yaw_mount:.4f}')
+        plt.plot(np.linspace(0,2*np.pi, 360), errors, label='median lat velocity')
+        plt.plot(np.linspace(0,2*np.pi, 360), forward_speeds, label='median forward velocity')
+        plt.vlines(best_yaw_mount,-10, 10, color='red', label='best yaw mount angle')
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_median_velocities_vs_mount_angle.png')
+        plt.close('all')
+
+
+    v_s_adjusted = R_sw @ v_enu
+    v_s_adjusted = (best_R_yaw.T @ v_s_adjusted).squeeze()
+
+    if visualize:
+        plt.plot(v_s_adjusted,label=['v_s_x', 'v_s_y','v_s_z'])
+        plt.title(f"PVT velocity in S-frame\nMount angle: {best_yaw_mount}")
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_s_frame.png')
+        plt.close('all')
+
+
+    
 
     # Step 4:
     # rotating data to S-frame - IMU and ground truth speed 
@@ -357,10 +423,10 @@ def rotate_data(task):
 
 
     # rotation matrix form local frame to S-frame for IMU projection
-    R_sw = quaternion.as_rotation_matrix(quaternion.from_euler_angles(s_euler))
+    R_si = quaternion.as_rotation_matrix(quaternion.from_euler_angles(euler_si))
 
-    acc_s = (R_sw @ combined_data[['a_x','a_y','a_z']].values.reshape(-1,3,1)).squeeze()
-    gyro_s = (R_sw @ combined_data[['w_x','w_y','w_z']].values.reshape(-1,3,1)).squeeze()
+    acc_s = (R_si @ combined_data[['a_x','a_y','a_z']].values.reshape(-1,3,1)).squeeze()
+    gyro_s = (R_si @ combined_data[['w_x','w_y','w_z']].values.reshape(-1,3,1)).squeeze()
 
 
     rotate_data[['a_s_x', 'a_s_y','a_s_z']] = 0
@@ -369,24 +435,18 @@ def rotate_data(task):
     rotate_data[['w_s_x', 'w_s_y','w_s_z']] = 0
     rotate_data[['w_s_x', 'w_s_y','w_s_z']] = gyro_s
 
-    rotate_data['v_vehicle_x'] = v_vehicle[:,0]
-    rotate_data['v_vehicle_y'] = v_vehicle[:,1]
+    rotate_data['v_vehicle_x'] = v_v[:,0]
+    rotate_data['v_vehicle_y'] = v_v[:,1]
     rotate_data['mount_yaw'] = best_yaw_mount
 
-    rotate_data[['q_sw_w','q_sw_x','q_sw_y','q_sw_z']] = 0
-    rotate_data[['q_sw_w','q_sw_x','q_sw_y','q_sw_z']] = quaternion.as_float_array(quats_sw)
+    rotate_data[['q_si_w','q_si_x','q_si_y','q_si_z']] = 0
+    rotate_data[['q_si_w','q_si_x','q_si_y','q_si_z']] = quaternion.as_float_array(quats_si)
 
-    rotate_data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']] = 0
-    rotate_data[['q_iw_w','q_iw_x','q_iw_y','q_iw_z']] = quaternion.as_float_array(quats_iw)
+    rotate_data[['q_wi_w','q_wi_x','q_wi_y','q_wi_z']] = 0
+    rotate_data[['q_wi_w','q_wi_x','q_wi_y','q_wi_z']] = quaternion.as_float_array(quats_wi)
 
-    rotate_data['gt_vel_x'] = np.sin(-best_yaw_mount)*combined_data.speed.values
-    rotate_data['gt_vel_y'] = np.cos(-best_yaw_mount)*combined_data.speed.values
-
-    plt.plot(acc_s)
-    plt.title("Accelerometer in S-frame")
-    plt.grid()
-    plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_acc_in_s_frame.png')
-    plt.close('all')
+    rotate_data['gt_vel_x'] = v_s_adjusted[:,0]
+    rotate_data['gt_vel_y'] = v_s_adjusted[:,1]
 
     rotate_data.to_pickle(rotated_combined_data_path)
 
@@ -398,7 +458,7 @@ if __name__ == "__main__":
     dataloader_params = {
         "window" : 8*125*10,
         "step" : 1000,
-        "frequency": 50,
+        "frequency": 100,
         "batch_size" : 3
     }
 
@@ -409,13 +469,13 @@ if __name__ == "__main__":
     print('Preprocessing tasks...')
     with Pool(6) as p:
         # generating combined_data
-        res = [p.apply_async(generate_combined_data,args=(t,)) for t in tasks]
+        res = [p.apply_async(generate_combined_data,args=(t,dataloader_params['frequency'])) for t in tasks]
         for r in tqdm(res):
             r.get()
 
     with Pool(6) as p:
         # rotating data
-        res = [p.apply_async(rotate_data,args=(t,)) for t in tasks]
+        res = [p.apply_async(rotate_data,args=(t,dataloader_params['frequency'])) for t in tasks]
         for idx,r in tqdm(enumerate(res),total=len(tasks)):
             r.get()
 

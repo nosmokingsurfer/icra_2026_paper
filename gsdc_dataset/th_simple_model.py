@@ -26,6 +26,10 @@ class FGO_SimpleVDRModel(nn.Module):
         # optimization variables for inner loop
         window = self.dataloader_params['window']
 
+        gps_info = self.dataloader_params['gps_info']
+        odo_info = self.dataloader_params['odo_info']
+
+
         # have velocity output every 125 input samples
         self.B = self.dataloader_params['batch_size']
         self.N = window//125 + 1 # here 125 is deom SimpleVDR Model encoder structure
@@ -46,7 +50,7 @@ class FGO_SimpleVDRModel(nn.Module):
             meas_tensor = th.SE2(torch.zeros((self.B,3)), name=f"predicted_odometry_{i}")
 
             # meas_tensor = th.SE2(torch.tensor([gt_traj[i+1] - gt_traj[i], 0, 0]).reshape(1,-1))
-            cost_between = th.ScaleCostWeight(torch.ones((self.B,1)), name=f"scale_between_{i}")
+            cost_between = th.ScaleCostWeight(odo_info*torch.ones((self.B,1)), name=f"scale_between_{i}")
             self.cost_functions.append(
                         th.Between(poses[i], poses[i+1], meas_tensor,
                                 cost_between,
@@ -55,7 +59,7 @@ class FGO_SimpleVDRModel(nn.Module):
         # adding cost fuctors for absolute position
         for i in range(self.N):
             gt_pose_tensor = th.SE2(torch.zeros(self.B,3), name=f"gt_pose_{i}")
-            scale_gps = th.ScaleCostWeight(torch.ones((self.B,1)), name=f"scale_gps_{i}")
+            scale_gps = th.ScaleCostWeight(gps_info*torch.ones((self.B,1)), name=f"scale_gps_{i}")
             self.cost_functions.append(th.Difference(poses[i], gt_pose_tensor, scale_gps, name=f"gps_{i}"))
 
             self.objective = th.Objective()

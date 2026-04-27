@@ -137,12 +137,15 @@ if __name__ == "__main__":
         "window" : 8*125*10,
         "step" : 1000,
         "frequency": 50,
-        "batch_size" : 128
+        "batch_size" : 128,
+        "learning_rate" : 1e-3,
+        "gps_info" : 1.0,
+        "odo_info" : 1.0
     }
 
     data_path = "./data/smartphone-decimeter-2022/"
 
-    tasks = get_tasks_for_dataset()
+    tasks = get_tasks_for_dataset(data_path)
     tasks = tasks[:2]
 
     print('Preprocessing tasks...')
@@ -173,13 +176,13 @@ if __name__ == "__main__":
         monitor='train_loss'
         )
 
-
+    
     
     trainer = L.Trainer(
         # strategy='ddp_find_unused_parameters_true',
         accelerator='auto' if torch.cuda.is_available() else 'cpu',
         devices=[0] if torch.cuda.is_available() else None,
-        max_epochs=1000,
+        max_epochs=10,
         callbacks = [
             lr_monitor,
             checkpoint_monitor,
