@@ -1,8 +1,7 @@
 from pathlib import Path
 from tqdm import tqdm
 
-def get_tasks_for_dataset():
-    data_path = "./data/smartphone-decimeter-2022/"
+def get_tasks_for_dataset(data_path):
     imu_files = list(Path(data_path + "train/").rglob("**/device_imu.csv"))
 
 
