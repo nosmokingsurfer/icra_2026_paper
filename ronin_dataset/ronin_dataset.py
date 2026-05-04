@@ -18,7 +18,7 @@ import quaternion
 
 class RoninDataset(Spline_2D_Dataset):
     def __init__(self,
-                data_dir = './data/seen_subjects_test_set',
+                data_dir = './data/ronin/seen_subjects_test_set',
                 take_log_num=-1,
                 window = 100,
                 step = 10,
