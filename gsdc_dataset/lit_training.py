@@ -130,26 +130,29 @@ class LIT_GSDC_datamodule(L.LightningDataModule):
         self.hparams.update(dataloader_params)
         self.save_hyperparameters()
 
+        self.train_tasks = None
+        self.val_tasks = None
+
     def setup(self, stage):
         super().setup(stage)
-        # TODO make split for train and val here
+        train_ratio = self.dataloader_params['train_ratio']
 
-        # train_ratio = self.dataloader_params['train_ratio']
+        num_train = int(len(self.tasks)*train_ratio)
 
-        # train_length = train_ratio*len(self.tasks)
-        # val_length = len(self.tasks) - train_length
+        import random
+        shuffled_tasks = self.tasks.copy()
+        random.shuffle(shuffled_tasks)
 
-        # subset_A
-
-
+        self.train_tasks = shuffled_tasks[:num_train]
+        self.val_tasks = shuffled_tasks[num_train:]
 
 
     def train_dataloader(self):
-        dataset = GSDC_dataset('train', self.tasks, self.data_path, **self.dataloader_params)
+        dataset = GSDC_dataset('train', self.train_tasks, self.data_path, **self.dataloader_params)
         return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=True, drop_last=True,num_workers=8)
 
     def val_dataloader(self):
-        dataset = GSDC_dataset('val', self.tasks, self.data_path, **self.dataloader_params)
+        dataset = GSDC_dataset('val', self.val_tasks, self.data_path, **self.dataloader_params)
         return DataLoader(dataset,self.dataloader_params['batch_size'], shuffle=False, drop_last=True, num_workers=8)
 
     def test_dataloader(self):
@@ -214,6 +217,3 @@ if __name__ == "__main__":
     )
 
     trainer.fit(model, gsdc_datamodule)
-
-
-
