@@ -2,7 +2,7 @@ import torch
 import pytorch_lightning as L
 from  pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, BatchSizeFinder
 
-import torch.functional as F
+import torch.nn.functional as F
 from  torch.utils.data import DataLoader, random_split
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.multiprocessing import Pool
@@ -116,7 +116,7 @@ class LIT_SimpleVDRModel(L.LightningModule):
             result = {}
             pred_path = f"./out_vdr/{checkpoit_idx[b]}/{sample_id[b]}_predictions.csv"
 
-            result = pd.DataFrame(np.concatenate((pred[0].detach().numpy(),gt_vel[0].detach().numpy()),axis=-1), columns = ['pred_s_vx','pred_s_vy','gt_s_vx','gt_s_vy'])
+            result = pd.DataFrame(np.concatenate((pred[b].detach().numpy(),gt_vel[b].detach().numpy()),axis=-1), columns = ['pred_s_vx','pred_s_vy','gt_s_vx','gt_s_vy'])
             result = result[:lengths[b]]
             result.to_csv(pred_path, index=False)
         return loss
@@ -179,9 +179,6 @@ if __name__ == "__main__":
         res = [p.apply_async(generate_combined_data,args=(t,dataloader_params['frequency'])) for t in tasks]
         for r in tqdm(res):
             r.get()
-
-    for t in tasks:
-        rotate_data(t,dataloader_params['frequency'])
 
     with Pool(6) as p:
         # rotating data

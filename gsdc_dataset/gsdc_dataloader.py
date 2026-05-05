@@ -81,7 +81,7 @@ class GSDC_dataset(Dataset):
         self.task_data = {}
 
         for idx, task in tqdm(enumerate(self.tasks), total=len(self.tasks)):
-            rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_rotated_combined_data.pickle"
+            rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}_{self.dataloader_params['frequency']}/" + task['sample_id'] + "_rotated_combined_data.pickle"
             tmp = pd.read_pickle(rotated_combined_data_path)
             task['length'] = len(tmp)
             number_of_steps = np.int64(np.floor(len(tmp)- self.dataloader_params['window'])/self.dataloader_params['step'])
@@ -170,15 +170,15 @@ class GSDC_dataset(Dataset):
 
 def generate_combined_data(task, frequency=100):
 
-    combined_data_path = './out_vdr/' + f"{task['mode']}/"+ task['sample_id'] + "_combined_data.pickle"
+    combined_data_path = './out_vdr/' + f"{task['mode']}_{frequency}/"+ task['sample_id'] + "_combined_data.pickle"
     if os.path.exists(combined_data_path):
         return
 
     if not os.path.exists('./out_vdr/'):
         os.makedirs('./out_vdr',exist_ok=True)
     
-    if not os.path.exists(f"./out_vdr/{task['mode']}"):
-        os.makedirs(f"./out_vdr/{task['mode']}",exist_ok=True)
+    if not os.path.exists(f"./out_vdr/{task['mode']}_{frequency}"):
+        os.makedirs(f"./out_vdr/{task['mode']}_{frequency}",exist_ok=True)
 
     df = pd.read_csv(task['imu_file'])
     
@@ -242,11 +242,11 @@ def rotate_data(task, frequency=100):
     visualize = True
     sample_id = task['sample_id']
 
-    rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_rotated_combined_data.pickle"
+    rotated_combined_data_path = './out_vdr/'+ f"{task['mode']}_{frequency}/" + task['sample_id'] + "_rotated_combined_data.pickle"
     if os.path.exists(rotated_combined_data_path):
         return
     
-    combined_data_path = './out_vdr/'+ f"{task['mode']}/" + task['sample_id'] + "_combined_data.pickle"
+    combined_data_path = './out_vdr/'+ f"{task['mode']}_{frequency}/" + task['sample_id'] + "_combined_data.pickle"
 
     combined_data = pd.read_pickle(combined_data_path)
 
@@ -267,7 +267,7 @@ def rotate_data(task, frequency=100):
         plt.plot(e,n,label='gt trajectory')
         plt.title(f"{task['sample_id']}")
         plt.grid();plt.axis('equal');plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{task["sample_id"]}_gt_trajectory.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{task["sample_id"]}_gt_trajectory.png')
         plt.close('all')
 
 
@@ -291,7 +291,7 @@ def rotate_data(task, frequency=100):
 
         plt.plot(np.unwrap(combined_data.bearing.values),'-',color='red', label='bearing from pvt')
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_euler_w_to_imu.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_euler_w_to_imu.png')
         plt.close('all')
 
     # keeping only pitch and roll angles to rotate IMU frame to S-frame
@@ -306,7 +306,7 @@ def rotate_data(task, frequency=100):
         plt.title("Accelerometer in S-frame")
         plt.grid()
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_acc_in_s_frame.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_acc_in_s_frame.png')
         plt.close('all')
 
 
@@ -338,7 +338,7 @@ def rotate_data(task, frequency=100):
         plt.grid()
         plt.title(f"{task['sample_id']}")
         plt.axis('equal')
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_gt_trjectory_with_speed_direction.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_gt_trjectory_with_speed_direction.png')
         plt.close('all')
 
         plt.plot(ve, label='gt ve')
@@ -346,7 +346,7 @@ def rotate_data(task, frequency=100):
         plt.title(f"{task['sample_id']}")
         plt.grid()
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_gt_velocity_enu.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_gt_velocity_enu.png')
         plt.close('all')
 
     v_enu = np.vstack((ve, vn, vu)).transpose().reshape(-1,3,1)
@@ -387,7 +387,7 @@ def rotate_data(task, frequency=100):
         plt.title(f"PVT velocity in vehicle frame\nMount angle: {best_yaw_mount}")
         plt.grid()
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_vehicle_frame.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_pvt_in_vehicle_frame.png')
         plt.close('all')
 
 
@@ -398,7 +398,7 @@ def rotate_data(task, frequency=100):
         plt.vlines(best_yaw_mount,-10, 10, color='red', label='best yaw mount angle')
         plt.grid()
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_median_velocities_vs_mount_angle.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_median_velocities_vs_mount_angle.png')
         plt.close('all')
 
 
@@ -410,7 +410,7 @@ def rotate_data(task, frequency=100):
         plt.title(f"PVT velocity in S-frame\nMount angle: {best_yaw_mount}")
         plt.grid()
         plt.legend()
-        plt.savefig(f'./out_vdr/{task["mode"]}/{sample_id}_pvt_in_s_frame.png')
+        plt.savefig(f'./out_vdr/{task["mode"]}_{frequency}/{sample_id}_pvt_in_s_frame.png')
         plt.close('all')
 
 
@@ -464,7 +464,7 @@ if __name__ == "__main__":
 
     data_path = "./data/smartphone-decimeter-2022/"
 
-    tasks = get_tasks_for_dataset()
+    tasks = get_tasks_for_dataset(data_path)
 
     print('Preprocessing tasks...')
     with Pool(6) as p:
