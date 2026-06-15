@@ -27,6 +27,7 @@ from spline_dataset.spline_dataloader import convert_to_se3
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
+from utils_grad import *
 
 def compute_delta_x(gt_poses, estimated_poses):
     gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
@@ -238,13 +239,17 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/"
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
+        
+    grad_output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/grads"
+    if not os.path.exists(grad_output_path):
+        os.makedirs(grad_output_path, exist_ok=True)
 
     _input_channel, _output_channel = 6, 2
     _fc_config = {'fc_dim': 512, 'in_dim': 7, 'dropout': 0.5, 'trans_planes': 128}
 
     model = ResNet1D(_input_channel, _output_channel, BasicBlock1D, [2, 2, 2, 2],
                            base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
-    model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
+    # model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = 'min', factor=0.9, patience=5)
@@ -255,7 +260,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     if os.path.exists(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl'):
         train_dataset = pickle.load(open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','rb'))
     else:
-        train_dataset = RoninDataset(take_log_num=1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
+        train_dataset = RoninDataset(step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
         pickle.dump(train_dataset,open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','wb'))
 
     train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=train_dataset.get_collate_fn())
@@ -265,7 +270,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     if os.path.exists(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl'):
         val_dataset = pickle.load(open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','rb'))
     else:
-        val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
+        val_dataset = RoninDataset(step=20, window=200, subseq_len=3000,stride=10000)
         pickle.dump(val_dataset,open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','wb'))
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     print(len(val_dataset))
@@ -275,9 +280,10 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     chi2_errors = []
     learning_rates = []
     
-    trajectories_to_save = 5
+    trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
+    grad_dict = dict()
     for epoch in range(n_epochs):
 
         # running validation every epoch
@@ -343,6 +349,9 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                 total_rmse += loss.detach().cpu().item()
                 total_chi2 = np.nan
 
+            grad_dict = update_grads_dict(grad_dict, model, grad_tensor)
+            plot_norm_grads(model, epoch, grad_tensor, folder=grad_output_path)
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-5)
             optimizer.step()
         scheduler.step(total_rmse)
@@ -362,29 +371,31 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
         if epoch % 10 == 0:
             torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
+            
+        plot_grads_dict(grad_dict, folder=grad_output_path)
 
-    plt.title('Errors: CHi2 and RMSE')
-    plt.plot(chi2_errors,label='chi2')
-    plt.plot(rmse_errors,label='rmse')
-    plt.xlabel('epoch')
-    plt.grid()
-    plt.legend()
-    plt.savefig(f'{output_path}/errors.png')
-    plt.close('all')
+        plt.title('Errors: CHi2 and RMSE')
+        plt.plot(chi2_errors,label='chi2')
+        plt.plot(rmse_errors,label='rmse')
+        plt.xlabel('epoch')
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'{output_path}/errors.png')
+        plt.close('all')
 
-    plt.figure()
-    plt.plot(learning_rates,label='learning rate')
-    plt.grid()
-    plt.xlabel('epoch')
-    plt.legend()
-    plt.savefig(f'{output_path}/learning_rate.png')
-    plt.close('all')
+        plt.figure()
+        plt.plot(learning_rates,label='learning rate')
+        plt.grid()
+        plt.xlabel('epoch')
+        plt.legend()
+        plt.savefig(f'{output_path}/learning_rate.png')
+        plt.close('all')
 
 if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-    run_ronin_experiment(1, 300)
+    # run_ronin_experiment(1, 300)
     # run_ronin_experiment(20, 200)
     # run_ronin_experiment(3, 100)
     # run_ronin_experiment(4, 100)

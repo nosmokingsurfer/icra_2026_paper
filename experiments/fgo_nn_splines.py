@@ -28,6 +28,8 @@ from metric import compute_ate_rte
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
+from utils_grad import *
+
 
 def compute_delta_x(gt_poses, estimated_poses):
     gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
@@ -225,6 +227,10 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     output_path = f"./out/graphs_seq_{subseq_len}_epochs_{n_epochs}/"
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
+        
+    grad_output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/grads"
+    if not os.path.exists(grad_output_path):
+        os.makedirs(grad_output_path, exist_ok=True)
 
     model = ResNet1D(
         num_inputs=3,       
@@ -271,6 +277,7 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
+    grad_dict = dict()
     for epoch in range(n_epochs):
 
         # running validation every epoch
@@ -321,6 +328,9 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
                 total_rmse += loss.detach().cpu().item()
                 total_chi2 = np.nan
+            
+            grad_dict = update_grads_dict(grad_dict, model, grad_tensor)
+            plot_norm_grads(model, epoch, grad_tensor, folder=grad_output_path)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
             optimizer.step()
@@ -341,23 +351,25 @@ def run_spline_experiment(subseq_len = 3, n_epochs=300):
 
         if epoch % 10 == 0:
             torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
+        
+        plot_grads_dict(grad_dict, folder=grad_output_path)
 
-    plt.title('Errors: CHi2 and RMSE')
-    plt.plot(chi2_errors,label='chi2')
-    plt.plot(rmse_errors,label='rmse')
-    plt.xlabel('epoch')
-    plt.grid()
-    plt.legend()
-    plt.savefig(f'{output_path}/errors.png')
-    plt.close('all')
+        plt.title('Errors: CHi2 and RMSE')
+        plt.plot(chi2_errors,label='chi2')
+        plt.plot(rmse_errors,label='rmse')
+        plt.xlabel('epoch')
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'{output_path}/errors.png')
+        plt.close('all')
 
-    plt.figure()
-    plt.plot(learning_rates,label='learning rate')
-    plt.grid()
-    plt.xlabel('epoch')
-    plt.legend()
-    plt.savefig(f'{output_path}/learning_rate.png')
-    plt.close('all')
+        plt.figure()
+        plt.plot(learning_rates,label='learning rate')
+        plt.grid()
+        plt.xlabel('epoch')
+        plt.legend()
+        plt.savefig(f'{output_path}/learning_rate.png')
+        plt.close('all')
 
 if __name__ == "__main__":
 
