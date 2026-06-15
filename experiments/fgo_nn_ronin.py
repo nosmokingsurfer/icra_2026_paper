@@ -6,6 +6,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 # import imageio.v2 as imageio
+from matplotlib.collections import LineCollection                                                                                                                                          
+from matplotlib.lines import Line2D                                                                                                                                                        
 
 import os
 import sys
@@ -156,6 +158,42 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     
     return grad_final, chi2, rmse
 
+
+def plot_trajectories(est_pose_seq, gt_poses_seq, epoch, ate, rte, save_path):
+    fig, ax = plt.subplots(figsize=(8, 8))
+    N = len(est_pose_seq)
+    t = np.linspace(0, 1, N - 1)
+
+    est_x, est_y = est_pose_seq[:, 0, 3], est_pose_seq[:, 1, 3]
+    pts = np.stack([est_x, est_y], axis=1).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    lc_est = LineCollection(segs, cmap='viridis', norm=plt.Normalize(0, 1), linewidth=5)
+    lc_est.set_array(t)
+    ax.add_collection(lc_est)
+
+    gt_np = gt_poses_seq[:, :2].detach().cpu().numpy()
+    pts_gt = gt_np.reshape(-1, 1, 2)
+    segs_gt = np.concatenate([pts_gt[:-1], pts_gt[1:]], axis=1)
+    lc_gt = LineCollection(segs_gt, cmap='viridis', norm=plt.Normalize(0, 1), linewidth=2)
+    lc_gt.set_array(t)
+    ax.add_collection(lc_gt)
+
+    ax.autoscale()
+    ax.set_aspect('equal')
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    cmap = plt.get_cmap('viridis')
+    ax.legend(handles=[
+        Line2D([0], [0], color=cmap(0.5), linewidth=5, label='estimated'),
+        Line2D([0], [0], color=cmap(0.5), linewidth=2, label='GT'),
+    ])
+    ax.grid()
+    ax.set_title(f'Epoch: {epoch}\nATE: {ate:.3f}, RTE: {rte:.3f}')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close('all')
+
+
 def run_validation(epoch, output_path, model, dataset, num_traj):
     model.eval()
 
@@ -205,22 +243,8 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         result['ate'] = ate
         result['rte'] = rte
 
-        plt.figure(figsize=(8,8))
-
-        plt.plot(est_pose_seq[:,0,3],est_pose_seq[:,1,3], '-b', marker='o', label='estimated')
-        plt.plot(gt_poses_seq[:, :2][:, 0], gt_poses_seq[:, :2][:, 1], label='GT', color='red')
-        plt.title("2D Pose Graph")
-
-        plt.xlabel("X")
-        plt.ylabel("Y")
-        plt.legend()
-        plt.axis('equal')
-        plt.grid()
-        plt.title(f'Epoch: {epoch}\n' + \
-            f"ATE: {ate:.3f}, RTE: {rte:.3f}")
-        plt.tight_layout()
-        plt.savefig(f'{output_path}idx_{i}_epoch_{epoch}.jpg')
-        plt.close('all')
+        plot_trajectories(est_pose_seq, gt_poses_seq, epoch, ate, rte,
+                          save_path=f'{output_path}idx_{i}_epoch_{epoch}.jpg')
         pickle.dump(result, open(f'{output_path}idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 
