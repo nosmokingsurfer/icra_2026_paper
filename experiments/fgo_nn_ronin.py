@@ -6,19 +6,24 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 # import imageio.v2 as imageio
+from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 
 import os
 import sys
 import pickle
 from tqdm import tqdm
 from pathlib import Path
+from datetime import datetime
 
+LOG_GRADS = True
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from torch.multiprocessing import Pool
+from torch.utils.tensorboard import SummaryWriter
 
 from ronin_dataset.ronin_dataset import RoninDataset
 from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
@@ -27,6 +32,7 @@ from spline_dataset.spline_dataloader import convert_to_se3
 from ronin_resnet import get_model
 from ronin_resnet import ResNet1D, BasicBlock1D, FCOutputModule
 from model_temporal import TCNSeqNetwork
+from utils_grad import *
 
 def compute_delta_x(gt_poses, estimated_poses):
     gt_poses_se3 = [mrob.SE3(gt_poses[i]) for i in range(len(gt_poses))]
@@ -155,6 +161,42 @@ def process_one_graph(vel_pred, gt_pose_seq, dt):
     
     return grad_final, chi2, rmse
 
+
+def plot_trajectories(est_pose_seq, gt_poses_seq, epoch, ate, rte, save_path):
+    fig, ax = plt.subplots(figsize=(8, 8))
+    N = len(est_pose_seq)
+    t = np.linspace(0, 1, N - 1)
+
+    est_x, est_y = est_pose_seq[:, 0, 3], est_pose_seq[:, 1, 3]
+    pts = np.stack([est_x, est_y], axis=1).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    lc_est = LineCollection(segs, cmap='viridis', norm=plt.Normalize(0, 1), linewidth=5)
+    lc_est.set_array(t)
+    ax.add_collection(lc_est)
+
+    gt_np = gt_poses_seq[:, :2].detach().cpu().numpy()
+    pts_gt = gt_np.reshape(-1, 1, 2)
+    segs_gt = np.concatenate([pts_gt[:-1], pts_gt[1:]], axis=1)
+    lc_gt = LineCollection(segs_gt, cmap='viridis', norm=plt.Normalize(0, 1), linewidth=2)
+    lc_gt.set_array(t)
+    ax.add_collection(lc_gt)
+
+    ax.autoscale()
+    ax.set_aspect('equal')
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    cmap = plt.get_cmap('viridis')
+    ax.legend(handles=[
+        Line2D([0], [0], color=cmap(0.5), linewidth=5, label='estimated'),
+        Line2D([0], [0], color=cmap(0.5), linewidth=2, label='GT'),
+    ])
+    ax.grid()
+    ax.set_title(f'Epoch: {epoch}\nATE: {ate:.3f}, RTE: {rte:.3f}')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close('all')
+
+
 def run_validation(epoch, output_path, model, dataset, num_traj):
     model.eval()
 
@@ -204,22 +246,8 @@ def run_validation(epoch, output_path, model, dataset, num_traj):
         result['ate'] = ate
         result['rte'] = rte
 
-        plt.figure(figsize=(8,8))
-
-        plt.plot(est_pose_seq[:,0,3],est_pose_seq[:,1,3], '-b', marker='o', label='estimated')
-        plt.plot(gt_poses_seq[:, :2][:, 0], gt_poses_seq[:, :2][:, 1], label='GT', color='red')
-        plt.title("2D Pose Graph")
-
-        plt.xlabel("X")
-        plt.ylabel("Y")
-        plt.legend()
-        plt.axis('equal')
-        plt.grid()
-        plt.title(f'Epoch: {epoch}\n' + \
-            f"ATE: {ate:.3f}, RTE: {rte:.3f}")
-        plt.tight_layout()
-        plt.savefig(f'{output_path}idx_{i}_epoch_{epoch}.jpg')
-        plt.close('all')
+        plot_trajectories(est_pose_seq, gt_poses_seq, epoch, ate, rte,
+                          save_path=f'{output_path}idx_{i}_epoch_{epoch}.jpg')
         pickle.dump(result, open(f'{output_path}idx_{i}_epoch_{epoch}_traj.pkl','wb'))
 
 
@@ -238,13 +266,17 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/"
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
+        
+    if LOG_GRADS:
+        grad_output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/grads"
+        os.makedirs(grad_output_path, exist_ok=True)
 
     _input_channel, _output_channel = 6, 2
     _fc_config = {'fc_dim': 512, 'in_dim': 7, 'dropout': 0.5, 'trans_planes': 128}
 
     model = ResNet1D(_input_channel, _output_channel, BasicBlock1D, [2, 2, 2, 2],
                            base_plane=64, output_block=FCOutputModule, kernel_size=3, **_fc_config)
-    model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
+    # model.load_state_dict(torch.load("models/ronin_resnet/checkpoint_gsn_latest.pt",map_location='cpu')['model_state_dict'])
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode = 'min', factor=0.9, patience=5)
@@ -255,7 +287,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     if os.path.exists(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl'):
         train_dataset = pickle.load(open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','rb'))
     else:
-        train_dataset = RoninDataset(take_log_num=1,step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
+        train_dataset = RoninDataset(step=20, window=200,subseq_len=subseq_len, mode='train',stride=10000)
         pickle.dump(train_dataset,open(f'./out/ronin_cache/train_dataset_seq_{subseq_len}.pkl','wb'))
 
     train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=train_dataset.get_collate_fn())
@@ -265,7 +297,7 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     if os.path.exists(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl'):
         val_dataset = pickle.load(open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','rb'))
     else:
-        val_dataset = RoninDataset(take_log_num=1, step=20, window=200, subseq_len=3000,stride=10000)
+        val_dataset = RoninDataset(step=20, window=200, subseq_len=3000,stride=10000)
         pickle.dump(val_dataset,open(f'./out/ronin_cache/val_dataset_seq_{subseq_len}.pkl','wb'))
     val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
     print(len(val_dataset))
@@ -275,9 +307,13 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     chi2_errors = []
     learning_rates = []
     
-    trajectories_to_save = 5
+    trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
+    run_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+    writer = SummaryWriter(log_dir=output_path + f'tb_logs/{run_name}')
+
+    grad_dict = dict()
     for epoch in range(n_epochs):
 
         # running validation every epoch
@@ -285,7 +321,8 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
             
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
-        
+        global_step = epoch * len(train_dataloader)
+
         for sample in tqdm(train_dataloader, position=0, leave=True):
             # sample  = dataset.__getitem__(i)
             imu_seq = sample['imu']
@@ -343,13 +380,25 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                 total_rmse += loss.detach().cpu().item()
                 total_chi2 = np.nan
 
+            global_step += 1
+            if LOG_GRADS:
+                grad_dict = update_grads_dict(grad_dict, model, grad_tensor, writer=writer, step=global_step)
+                plot_norm_grads(model, epoch, grad_tensor, folder=grad_output_path, writer=writer, step=global_step)
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-5)
             optimizer.step()
         scheduler.step(total_rmse)
-        
+
+        if LOG_GRADS:
+            plot_all_grads(model, writer=writer, step=epoch)
+
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
         learning_rates.append(scheduler._last_lr[0])
+
+        writer.add_scalar('train/chi2', chi2_errors[-1], epoch)
+        writer.add_scalar('train/rmse', rmse_errors[-1], epoch)
+        writer.add_scalar('train/lr',   learning_rates[-1], epoch)
 
         print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
         print(f"Learning Rate : {scheduler._last_lr}")
@@ -362,29 +411,34 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
 
         if epoch % 10 == 0:
             torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
+            
+        if LOG_GRADS and writer is None:
+            plot_grads_dict(grad_dict, folder=grad_output_path)
 
-    plt.title('Errors: CHi2 and RMSE')
-    plt.plot(chi2_errors,label='chi2')
-    plt.plot(rmse_errors,label='rmse')
-    plt.xlabel('epoch')
-    plt.grid()
-    plt.legend()
-    plt.savefig(f'{output_path}/errors.png')
-    plt.close('all')
+        plt.title('Errors: CHi2 and RMSE')
+        plt.plot(chi2_errors,label='chi2')
+        plt.plot(rmse_errors,label='rmse')
+        plt.xlabel('epoch')
+        plt.grid()
+        plt.legend()
+        plt.savefig(f'{output_path}/errors.png')
+        plt.close('all')
 
-    plt.figure()
-    plt.plot(learning_rates,label='learning rate')
-    plt.grid()
-    plt.xlabel('epoch')
-    plt.legend()
-    plt.savefig(f'{output_path}/learning_rate.png')
-    plt.close('all')
+        plt.figure()
+        plt.plot(learning_rates,label='learning rate')
+        plt.grid()
+        plt.xlabel('epoch')
+        plt.legend()
+        plt.savefig(f'{output_path}/learning_rate.png')
+        plt.close('all')
+
+    writer.close()
 
 if __name__ == "__main__":
 
     # for s in range(1,5,1):
     #     run_spline_experiment(s, 50)
-    run_ronin_experiment(1, 300)
+    # run_ronin_experiment(1, 300)
     # run_ronin_experiment(20, 200)
     # run_ronin_experiment(3, 100)
     # run_ronin_experiment(4, 100)
