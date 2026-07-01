@@ -6,21 +6,24 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 # import imageio.v2 as imageio
-from matplotlib.collections import LineCollection                                                                                                                                          
-from matplotlib.lines import Line2D                                                                                                                                                        
+from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 
 import os
 import sys
 import pickle
 from tqdm import tqdm
 from pathlib import Path
+from datetime import datetime
 
+LOG_GRADS = True
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from torch.multiprocessing import Pool
+from torch.utils.tensorboard import SummaryWriter
 
 from ronin_dataset.ronin_dataset import RoninDataset
 from experiments.utils_metrics import compute_rmse_and_yaw, compute_ate_rte
@@ -264,8 +267,8 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     if not os.path.exists(output_path):
         os.makedirs(output_path, exist_ok=True)
         
-    grad_output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/grads"
-    if not os.path.exists(grad_output_path):
+    if LOG_GRADS:
+        grad_output_path = f"./out/ronin_graphs_seq_{subseq_len}_epochs_{n_epochs}/grads"
         os.makedirs(grad_output_path, exist_ok=True)
 
     _input_channel, _output_channel = 6, 2
@@ -307,6 +310,9 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
     trajectories_to_save = 3
     results['num_val_traj'] = trajectories_to_save
 
+    run_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+    writer = SummaryWriter(log_dir=output_path + f'tb_logs/{run_name}')
+
     grad_dict = dict()
     for epoch in range(n_epochs):
 
@@ -315,7 +321,8 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
             
         total_chi2, total_rmse = 0.0, 0.0
         model.train()
-        
+        global_step = epoch * len(train_dataloader)
+
         for sample in tqdm(train_dataloader, position=0, leave=True):
             # sample  = dataset.__getitem__(i)
             imu_seq = sample['imu']
@@ -373,16 +380,25 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
                 total_rmse += loss.detach().cpu().item()
                 total_chi2 = np.nan
 
-            grad_dict = update_grads_dict(grad_dict, model, grad_tensor)
-            plot_norm_grads(model, epoch, grad_tensor, folder=grad_output_path)
+            global_step += 1
+            if LOG_GRADS:
+                grad_dict = update_grads_dict(grad_dict, model, grad_tensor, writer=writer, step=global_step)
+                plot_norm_grads(model, epoch, grad_tensor, folder=grad_output_path, writer=writer, step=global_step)
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1e-5)
             optimizer.step()
         scheduler.step(total_rmse)
-        
+
+        if LOG_GRADS:
+            plot_all_grads(model, writer=writer, step=epoch)
+
         chi2_errors.append(total_chi2 / len(train_dataloader))
         rmse_errors.append(total_rmse / len(train_dataloader))
         learning_rates.append(scheduler._last_lr[0])
+
+        writer.add_scalar('train/chi2', chi2_errors[-1], epoch)
+        writer.add_scalar('train/rmse', rmse_errors[-1], epoch)
+        writer.add_scalar('train/lr',   learning_rates[-1], epoch)
 
         print(f"[Epoch {epoch}] Chi2: {chi2_errors[-1]:.4f}, RMSE: {rmse_errors[-1]:.4f}")
         print(f"Learning Rate : {scheduler._last_lr}")
@@ -396,7 +412,8 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
         if epoch % 10 == 0:
             torch.save(model, output_path + f'model_epoch_{epoch}.cpt')
             
-        plot_grads_dict(grad_dict, folder=grad_output_path)
+        if LOG_GRADS and writer is None:
+            plot_grads_dict(grad_dict, folder=grad_output_path)
 
         plt.title('Errors: CHi2 and RMSE')
         plt.plot(chi2_errors,label='chi2')
@@ -414,6 +431,8 @@ def run_ronin_experiment(subseq_len = 3, n_epochs=300):
         plt.legend()
         plt.savefig(f'{output_path}/learning_rate.png')
         plt.close('all')
+
+    writer.close()
 
 if __name__ == "__main__":
 
